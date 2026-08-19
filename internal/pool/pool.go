@@ -42,21 +42,25 @@ type Status struct {
 	Cooling  bool      `json:"cooling"`
 	Until    time.Time `json:"until,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
-	Disabled bool      `json:"disabled"`
-	ErrCount int       `json:"err_count,omitempty"`
+	// Disabled = session 失效硬禁用（需重登或换文件恢复）；Enabled = 软开关（用户可逆启停）。
+	// 对外暴露：Disabled 与 Enabled 都为 false 才算可被 Pick（healthy）。
+	Disabled bool `json:"disabled"`
+	Enabled  bool `json:"enabled"`
+	ErrCount int   `json:"err_count,omitempty"`
 }
 
 type entry struct {
 	a        *auth.Auth
 	credits  int64
-	disabled bool
+	disabled bool // session dead 硬禁用
+	enabled  bool // 用户软开关（默认 true），false 时 Pick 跳过
 	reason   string
 	until    time.Time
 	errCount int
 }
 
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled {
+	if e.disabled || !e.enabled {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -65,14 +69,18 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// stateEntry state.json 单账号持久化条目。
+type stateEntry struct {
+	Credits  int64     `json:"credits"`
+	Disabled bool     `json:"disabled"`
+	Enabled  *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason   string    `json:"reason,omitempty"`
+	Until    time.Time `json:"until,omitempty"`
+}
+
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	} `json:"accounts"`
+	Accounts map[string]stateEntry `json:"accounts"`
 }
 
 // Pool 账号池。
@@ -96,10 +104,10 @@ func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
+		e.a = a // 保留 credits/cooling/enabled 状态
 		return
 	}
-	p.byUID[a.UID] = &entry{a: a}
+	p.byUID[a.UID] = &entry{a: a, enabled: true}
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
@@ -112,7 +120,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 		if e, ok := p.byUID[a.UID]; ok {
 			e.a = a
 		} else {
-			p.byUID[a.UID] = &entry{a: a}
+			p.byUID[a.UID] = &entry{a: a, enabled: true}
 		}
 	}
 	for uid := range p.byUID {
@@ -120,6 +128,42 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 			delete(p.byUID, uid)
 		}
 	}
+}
+
+// Remove 删除账号（仅清内存索引与 state.json 条目；auths/trae-{uid}.json 由调用方删）。
+// 不存在返回 false，调用方据此决定 404。
+func (p *Pool) Remove(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.byUID[uid]; !ok {
+		return false
+	}
+	delete(p.byUID, uid)
+	p.saveLocked()
+	return true
+}
+
+// SetEnabled 切换账号软开关；不影响 disabled（session dead）状态。
+// reason 仅在关闭时记录。不存在返回 false。
+func (p *Pool) SetEnabled(uid string, enabled bool, reason string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.enabled = enabled
+	if !enabled && reason != "" {
+		e.reason = reason
+	}
+	if enabled {
+		// 重新启用时清掉软关闭的 reason；disabled/cooling 不动
+		if e.reason != "" && !e.disabled && e.until.IsZero() {
+			e.reason = ""
+		}
+	}
+	p.saveLocked()
+	return true
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
@@ -269,6 +313,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Until:    e.until,
 		Reason:   e.reason,
 		Disabled: e.disabled,
+		Enabled:  e.enabled,
 		ErrCount: e.errCount,
 	}
 }
@@ -287,10 +332,15 @@ func (p *Pool) load() {
 		return
 	}
 	for uid, s := range sf.Accounts {
+		enabled := true // 旧文件无 enabled 字段 → 默认启用，向后兼容
+		if s.Enabled != nil {
+			enabled = *s.Enabled
+		}
 		p.byUID[uid] = &entry{
 			a:        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:  s.Credits,
 			disabled: s.Disabled,
+			enabled:  enabled,
 			reason:   s.Reason,
 			until:    s.Until,
 		}
@@ -301,24 +351,20 @@ func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := stateFile{Accounts: map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	}{}}
+	sf := stateFile{Accounts: map[string]stateEntry{}}
 	for uid, e := range p.byUID {
-		sf.Accounts[uid] = struct {
-			Credits  int64     `json:"credits"`
-			Disabled bool      `json:"disabled"`
-			Reason   string    `json:"reason,omitempty"`
-			Until    time.Time `json:"until,omitempty"`
-		}{
+		se := stateEntry{
 			Credits:  e.credits,
 			Disabled: e.disabled,
 			Reason:   e.reason,
 			Until:    e.until,
 		}
+		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
+		if !e.enabled {
+			f := false
+			se.Enabled = &f
+		}
+		sf.Accounts[uid] = se
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
