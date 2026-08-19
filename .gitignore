@@ -17,7 +17,8 @@ tw2api
 # 文档(doc 排除上传): 本地 md 不入库,README 除外
 *.md
 !README.md
-docs/
+docs/*
+!docs/RESEARCH.md
 
 # 构建产物
 *.tmp
