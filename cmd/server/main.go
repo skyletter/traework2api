@@ -55,6 +55,7 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		AuthDir:      cfg.AuthDir,
 		PlanCooldown: cfg.PlanCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,
@@ -77,6 +78,31 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+
+	// 第二个 http.Server：监听 CallbackPort（默认 18080），只处理 /authorize 回调。
+	// 复用同一 Handler（/authorize 已在主 mux 注册）。
+	// cfg.CallbackPort == "0" 时不启动（纯手动粘贴模式）。
+	var cbSrv *http.Server
+	if cfg.CallbackPort != "" && cfg.CallbackPort != "0" {
+		cbSrv = &http.Server{
+			Addr:              "127.0.0.1:" + cfg.CallbackPort,
+			Handler:           h,
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+		go func() {
+			<-ctx.Done()
+			sc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = cbSrv.Shutdown(sc)
+		}()
+		go func() {
+			log.Printf("traework2api callback server on 127.0.0.1:%s (TRAE login /authorize)", cfg.CallbackPort)
+			if err := cbSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				// 端口被占用（login.sh / 旧实例）不致命，降级为手动粘贴模式。
+				log.Printf("callback server (:%s) failed: %v — web 登录降级为手动粘贴回调链接", cfg.CallbackPort, err)
+			}
+		}()
+	}
 
 	log.Printf("traework2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
