@@ -194,11 +194,11 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 	}
 	var resp struct {
 		Result struct {
-			Token                string `json:"Token"`
-			TokenExpireAt        int64  `json:"TokenExpireAt"`
-			TokenExpireDuration  int64  `json:"TokenExpireDuration"`
-			RefreshToken         string `json:"RefreshToken"`
-			RefreshExpireAt      int64  `json:"RefreshExpireAt"`
+			Token               string `json:"Token"`
+			TokenExpireAt       int64  `json:"TokenExpireAt"`
+			TokenExpireDuration int64  `json:"TokenExpireDuration"`
+			RefreshToken        string `json:"RefreshToken"`
+			RefreshExpireAt     int64  `json:"RefreshExpireAt"`
 		} `json:"Result"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -291,7 +291,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	var resp struct {
 		ConfigInfoList []struct {
-			ConfigName string `json:"config_name"`
+			ConfigName    string `json:"config_name"`
 			DisplayConfig struct {
 				DisplayName string `json:"display_name"`
 			} `json:"display_config"`
@@ -354,32 +354,49 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 
 // UserEntUsage 聚合积分（ide_user_ent_usage 的 credits_limit 求和）。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
+	remain, _, _, _, err = c.EntUsage(a)
+	return remain, err
+}
+
+// EntUsage 查询账号额度明细（积分总量/已用/剩余/权益包数）。
+// remain = limit - used，usage.credits_amount 是已用积分（实测）。
+func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, 0, err
 	}
 	UgHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, 0, err
 	}
 	var resp struct {
-		IsCreditsBilling bool `json:"is_credits_billing"`
 		UserEntitlementPackList []struct {
 			EntitlementBaseInfo struct {
 				Quota struct {
 					CreditsLimit int64 `json:"credits_limit"`
 				} `json:"quota"`
 			} `json:"entitlement_base_info"`
+			Usage struct {
+				CreditsAmount float64 `json:"credits_amount"`
+			} `json:"usage"`
 		} `json:"user_entitlement_pack_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("ent usage parse: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("ent usage parse: %w", err)
 	}
 	for _, p := range resp.UserEntitlementPackList {
-		remain += p.EntitlementBaseInfo.Quota.CreditsLimit
+		l := p.EntitlementBaseInfo.Quota.CreditsLimit
+		if l <= 0 {
+			continue
+		}
+		u := int64(p.Usage.CreditsAmount)
+		limit += l
+		used += u
+		remain += l - u
+		packs++
 	}
-	return remain, nil
+	return remain, limit, used, packs, nil
 }
 
 // GetUserInfo 查询账号信息（登录用）。

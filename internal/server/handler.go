@@ -67,6 +67,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 管理面板：本地面板，不鉴权；只开放查询接口，CLI 操作留待开发
+	h.mux.HandleFunc("GET /admin", h.adminPage)
+	h.mux.HandleFunc("GET /admin/api/credits", h.adminCredits)
 	return h
 }
 

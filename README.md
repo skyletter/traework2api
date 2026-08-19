@@ -1,5 +1,11 @@
 # traework2api
 
+> **本 fork 新增功能：`/admin` 管理面板（查看额度）**
+>
+> 访问 `http://<host>:7864/admin` 即可查看**所有账号**的实时额度：积分剩余 / 总量 / 已用 / 权益包数，以及签到状态（已签/未签/签到禁用）、冷却与禁用标记。
+> 面板无需鉴权（本地面板），60s 自动刷新，支持多账号并发拉取，零外部依赖（HTML 经 `go:embed` 内嵌）。
+> 查询接口：`GET /admin/api/credits`（JSON）。签到、Token 刷新等 CLI 操作尚未映射到面板，后续待开发。
+
 TRAE Work (SOLO CN) 的 OpenAI 兼容反向代理。把 TRAE SOLO 免费对话通道
 （`llm_utils_chat` + `function=solo_work_lite`）包装成标准的
 `/v1/chat/completions` + `/v1/models` 接口，支持多账号轮转、自动签到、token 自动刷新。
