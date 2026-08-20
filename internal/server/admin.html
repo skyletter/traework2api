@@ -100,7 +100,7 @@
 
   <div class="keybar">
     <span>API Key（写操作需）：</span>
-    <input id="apikey" type="password" placeholder="TW2A_API_KEY，留空则不鉴权" oninput="onKeyChange()">
+    <input id="apikey" type="password" placeholder="TW2A_API_KEY（写操作必填，点「记忆」保存）" oninput="onKeyChange()">
     <button class="btn sm" onclick="saveKey()">保存</button>
     <span id="keystatus" class="saved" style="display:none">已记忆</span>
     <span style="margin-left:auto;font-size:11px">列表/额度为只读；导入/删除/开关/登录需 Key</span>
@@ -156,6 +156,12 @@ function fmt(n){ return (n==null?'-':Number(n).toLocaleString()); }
 function authHeader(){
   const k = getKey();
   return k ? { 'Authorization': 'Bearer ' + k } : {};
+}
+function apiErr(d, fallback){
+  if(d && d.error && d.error.code === 'invalid_api_key'){
+    return '需要有效 API Key：请在顶部「API Key」输入框填写 TW2A_API_KEY，点「记忆」后重试';
+  }
+  return (d && (d.error?.message || d.message)) || fallback || '请求失败';
 }
 function getKey(){ return document.getElementById('apikey').value.trim(); }
 function onKeyChange(){ document.getElementById('keystatus').style.display='none'; }
@@ -230,14 +236,14 @@ async function toggleAcct(uid, enabled){
     method:'PATCH', headers:{'Content-Type':'application/json', ...authHeader()},
     body: JSON.stringify({enabled: enabled})
   });
-  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('切换失败：'+(e.error?.message||r.statusText)); loadAccounts(); return; }
+  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('切换失败：'+apiErr(e)); loadAccounts(); return; }
   loadAccounts();
 }
 async function refreshAcct(uid){
   const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/refresh', {
     method:'POST', headers: authHeader()
   });
-  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('刷新失败：'+(e.error?.message||r.statusText)); }
+  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('刷新失败：'+apiErr(e)); }
   loadAccounts();
 }
 async function deleteAcct(uid){
@@ -245,7 +251,7 @@ async function deleteAcct(uid){
   const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid), {
     method:'DELETE', headers: authHeader()
   });
-  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('删除失败：'+(e.error?.message||r.statusText)); }
+  if(!r.ok){ const e = await r.json().catch(()=>({})); alert('删除失败：'+apiErr(e)); }
   loadAccounts();
 }
 async function showJSON(uid){
@@ -274,7 +280,7 @@ async function importCred(){
       method:'POST', headers:{'Content-Type':contentType, ...authHeader()}, body
     });
     const d = await r.json();
-    if(!r.ok){ st.className='login-status err'; st.textContent='导入失败：'+(d.error?.message||r.statusText); return; }
+    if(!r.ok){ st.className='login-status err'; st.textContent='导入失败：'+apiErr(d); return; }
     st.className='login-status ok';
     st.textContent='导入成功：'+(d.uid||'?')+'（'+(d.action||'')+'）';
     document.getElementById('impInput').value='';
@@ -290,7 +296,7 @@ async function startLogin(){
   try{
     const r = await fetch('/admin/api/login', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body:'{}'});
     const d = await r.json();
-    if(!r.ok){ st.className='login-status err'; st.textContent='生成失败：'+(d.error?.message||r.statusText); btn.disabled=false; return; }
+    if(!r.ok){ st.className='login-status err'; st.textContent='生成失败：'+apiErr(d); btn.disabled=false; return; }
     st.textContent = '已打开登录窗口，请在浏览器完成手机号登录。完成后此页自动刷新。';
     window.open(d.login_url, '_blank');
     pollLogin(d.pending_id);
