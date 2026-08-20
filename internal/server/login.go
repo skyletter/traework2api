@@ -24,19 +24,19 @@ import (
 type pendingState string
 
 const (
-	pendingStateActive  pendingState = "pending"   // 等待用户登录回调
-	pendingStateSuccess pendingState = "success"    // 回调捕获 + 落盘成功
-	pendingStateFailed  pendingState = "failed"     // ExchangeToken/落盘失败
+	pendingStateActive   pendingState = "pending"  // 等待用户登录回调
+	pendingStateSuccess  pendingState = "success"  // 回调捕获 + 落盘成功
+	pendingStateFailed   pendingState = "failed"   // ExchangeToken/落盘失败
 	pendingStateCanceled pendingState = "canceled" // 用户取消
 )
 
 // pendingLogin 单次登录的临时上下文。
 type pendingLogin struct {
-	state     pendingState
-	machineID string
-	deviceID  string
+	state       pendingState
+	machineID   string
+	deviceID    string
 	callbackURL string // auth_callback_url（含端口）
-	createdAt time.Time
+	createdAt   time.Time
 
 	// success 时填
 	uid      string
@@ -47,8 +47,8 @@ type pendingLogin struct {
 
 // loginStartResponse POST /admin/api/login 返回。
 type loginStartResponse struct {
-	LoginURL   string `json:"login_url"`
-	PendingID  string `json:"pending_id"`
+	LoginURL    string `json:"login_url"`
+	PendingID   string `json:"pending_id"`
 	CallbackURL string `json:"callback_url"`
 }
 
@@ -82,11 +82,11 @@ func (h *Handler) adminLoginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pl := &pendingLogin{
-		state:      pendingStateActive,
-		machineID:  machineID,
-		deviceID:   deviceID,
+		state:       pendingStateActive,
+		machineID:   machineID,
+		deviceID:    deviceID,
 		callbackURL: callbackURL,
-		createdAt:  time.Now(),
+		createdAt:   time.Now(),
 	}
 	h.loginMu.Lock()
 	h.logins[pendingID] = pl
@@ -158,12 +158,22 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 	// 兜底：若 query 无 machine_id 或无 pending，仍可凭 refreshToken 落盘（无 pending 上下文则 machine/device 用回调里的或新生成）
 	machineID := r.URL.Query().Get("machine_id")
 	deviceID := r.URL.Query().Get("device_id")
+	traceID := r.URL.Query().Get("loginTraceID")
+	// TRAE 回调不回传 machine_id/device_id，但回传 loginTraceID（= machineTraceID(machine,device) 派生）
+	// → 用 loginTraceID 反查 pending 拿回登录时生成的那一对 id，保证凭证与登录态一致
+	if machineID == "" || deviceID == "" {
+		if traceID != "" {
+			if pl, ok := h.getPendingByTrace(traceID); ok {
+				machineID, deviceID = pl.machineID, pl.deviceID
+			}
+		}
+	}
 
 	a := &auth.Auth{
 		AccessToken:  info.AccessToken,
 		RefreshToken: info.RefreshToken,
-		UID:         info.UID,
-		Nickname:    info.Nickname,
+		UID:          info.UID,
+		Nickname:     info.Nickname,
 		EnterpriseID: info.EnterpriseID,
 		Domain:       "trae.cn",
 		ApiHost:      "https://api.trae.com.cn",
@@ -175,7 +185,7 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 	if a.RefreshToken != "" {
 		if exErr := h.cfg.Upstream.RefreshToken(a); exErr != nil {
 			// 失败也继续（可能 refreshToken 已被轮换），但标记错误
-			h.markPendingByMachine(machineID, pendingStateFailed, "", "", exErr.Error())
+			h.markPendingByMachine(machineID, traceID, pendingStateFailed, "", "", exErr.Error())
 			authorizeRender(w, http.StatusBadGateway, "ExchangeToken 失败", exErr.Error())
 			return
 		}
@@ -193,13 +203,13 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.UID == "" {
 		err := errors.New("cannot determine uid from callback or GetUserInfo")
-		h.markPendingByMachine(machineID, pendingStateFailed, "", "", err.Error())
+		h.markPendingByMachine(machineID, traceID, pendingStateFailed, "", "", err.Error())
 		authorizeRender(w, http.StatusBadRequest, "登录失败", err.Error())
 		return
 	}
 	if a.AccessToken == "" {
 		err := errors.New("no access token after exchange")
-		h.markPendingByMachine(machineID, pendingStateFailed, "", "", err.Error())
+		h.markPendingByMachine(machineID, traceID, pendingStateFailed, "", "", err.Error())
 		authorizeRender(w, http.StatusBadRequest, "登录失败", err.Error())
 		return
 	}
@@ -209,30 +219,30 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 		a.FilePath = auth.FilePathFor(h.cfg.AuthDir, a.UID)
 	}
 	if mkErr := mkdirAll(h.cfg.AuthDir); mkErr != nil {
-		h.markPendingByMachine(machineID, pendingStateFailed, a.UID, a.Nickname, mkErr.Error())
+		h.markPendingByMachine(machineID, traceID, pendingStateFailed, a.UID, a.Nickname, mkErr.Error())
 		authorizeRender(w, http.StatusInternalServerError, "落盘失败", mkErr.Error())
 		return
 	}
 	if err := a.SaveAtomic(); err != nil {
-		h.markPendingByMachine(machineID, pendingStateFailed, a.UID, a.Nickname, err.Error())
+		h.markPendingByMachine(machineID, traceID, pendingStateFailed, a.UID, a.Nickname, err.Error())
 		authorizeRender(w, http.StatusInternalServerError, "落盘失败", err.Error())
 		return
 	}
 	h.cfg.Pool.Add(a)
-	h.markPendingByMachine(machineID, pendingStateSuccess, a.UID, a.Nickname, "")
+	h.markPendingByMachine(machineID, traceID, pendingStateSuccess, a.UID, a.Nickname, "")
 
 	authorizeRender(w, http.StatusOK, "登录成功", "账号 "+a.UID+"（"+a.Nickname+"）已添加，可关闭此窗口返回面板。")
 }
 
-// markPendingByMachine 用 machineID 反查 pending 并标记状态（一一对应）。
-func (h *Handler) markPendingByMachine(machineID string, state pendingState, uid, nick, errMsg string) {
-	if machineID == "" {
+// markPendingByMachine 用 machineID（或 loginTraceID 派生匹配）反查 pending 并标记状态。
+func (h *Handler) markPendingByMachine(machineID, traceID string, state pendingState, uid, nick, errMsg string) {
+	if machineID == "" && traceID == "" {
 		return
 	}
 	h.loginMu.Lock()
 	defer h.loginMu.Unlock()
 	for _, pl := range h.logins {
-		if pl.machineID == machineID {
+		if pl.machineID == machineID || (traceID != "" && machineTraceID(pl.machineID, pl.deviceID) == traceID) {
 			pl.state = state
 			if uid != "" {
 				pl.uid = uid
@@ -246,6 +256,22 @@ func (h *Handler) markPendingByMachine(machineID string, state pendingState, uid
 			return
 		}
 	}
+}
+
+// getPendingByTrace 用 loginTraceID（= machineTraceID(machine,device)）反查 pending。
+// TRAE 回调不回传 machine_id/device_id，但回传 loginTraceID，可据此关联回登录时生成的 id 对。
+func (h *Handler) getPendingByTrace(traceID string) (*pendingLogin, bool) {
+	if traceID == "" {
+		return nil, false
+	}
+	h.loginMu.Lock()
+	defer h.loginMu.Unlock()
+	for _, pl := range h.logins {
+		if machineTraceID(pl.machineID, pl.deviceID) == traceID {
+			return pl, true
+		}
+	}
+	return nil, false
 }
 
 // getPending 取 pending（不存在或已过期 false）。pending TTL 10 分钟。
