@@ -1,4 +1,4 @@
-// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
+﻿// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
 // 挑选策略：healthy 账号中剩余积分最多者（SPEC §4.7）。
 package pool
 
@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 // CoolKind 冷却类型。

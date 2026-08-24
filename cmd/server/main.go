@@ -1,4 +1,4 @@
-// main.go traework2api 入口：加载配置 → 构建 pool → 起 HTTP 服务。
+﻿// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
@@ -11,11 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/pool"
-	"traework2api/internal/scheduler"
-	"traework2api/internal/server"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/scheduler"
+	"trae2api-web/internal/server"
+	"trae2api-web/internal/upstream"
 )
 
 func main() {
@@ -96,7 +96,7 @@ func main() {
 			_ = cbSrv.Shutdown(sc)
 		}()
 		go func() {
-			log.Printf("traework2api callback server on 127.0.0.1:%s (TRAE login /authorize)", cfg.CallbackPort)
+			log.Printf("trae2api-web callback server on 127.0.0.1:%s (TRAE login /authorize)", cfg.CallbackPort)
 			if err := cbSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				// 端口被占用（login.sh / 旧实例）不致命，降级为手动粘贴模式。
 				log.Printf("callback server (:%s) failed: %v — web 登录降级为手动粘贴回调链接", cfg.CallbackPort, err)
@@ -104,7 +104,7 @@ func main() {
 		}()
 	}
 
-	log.Printf("traework2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
+	log.Printf("trae2api-web listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

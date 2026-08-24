@@ -1,4 +1,4 @@
-// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
+﻿// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
 package server
 
 import (
@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"traework2api/internal/pool"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 // Config handler 依赖。

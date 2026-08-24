@@ -1,4 +1,4 @@
-// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
+﻿// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
 // checkin_credits / ide_user_ent_usage + 错误分类。
 package upstream
 
@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长（SPEC §4.3）。

@@ -1,4 +1,4 @@
-// Package scheduler 定时任务：每日签到 + token 预刷新。
+﻿// Package scheduler 定时任务：每日签到 + token 预刷新。
 // 签到成功后重新查积分，积分 > 0 的冷却账号自动解冻。
 package scheduler
 
@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
-	"traework2api/internal/pool"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 // Config 调度器依赖。

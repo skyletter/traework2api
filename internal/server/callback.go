@@ -1,4 +1,4 @@
-// callback.go TRAE 登录回调解析 + 登录 URL 构造。
+﻿// callback.go TRAE 登录回调解析 + 登录 URL 构造。
 //
 // 移植自 login.sh 的内嵌 Python（parse_qs + 双层 JSON + unquote 容错），
 // 让 web 面板能在服务端完成「粘贴回调链接 → 换 token → 落盘」全流程，
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/upstream"
 )
 
 // appVersion 与 login.sh 保持一致；如未来 upstream.IdeVersion 升级，这里同步即可。

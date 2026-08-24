@@ -1,4 +1,4 @@
-package scheduler
+﻿package scheduler
 
 import (
 	"encoding/json"
@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/pool"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 func TestNextFire(t *testing.T) {

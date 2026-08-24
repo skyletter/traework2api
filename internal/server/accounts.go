@@ -1,4 +1,4 @@
-// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
+﻿// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
 //
 // 安全纪律（PLAN §4）：
 //   - 列表与 JSON 预览绝不返回完整 token，只给前缀 + 长度
@@ -14,7 +14,7 @@ import (
 	"os"
 	"strings"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 // accountSummary 列表/预览对外结构（脱敏）。

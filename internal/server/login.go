@@ -1,4 +1,4 @@
-// login.go Web 登录闭环：生成登录 URL → pending 态 → /authorize 回调捕获 →
+﻿// login.go Web 登录闭环：生成登录 URL → pending 态 → /authorize 回调捕获 →
 // ExchangeToken + GetUserInfo + 落盘 → 面板轮询 result。
 //
 // 回调端口策略（M0 结论：双端口 18080）：
@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 // pendingState pending 登录状态。

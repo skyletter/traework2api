@@ -1,4 +1,4 @@
-// credit — TRAE SOLO 积分查询（全部账号 + 指定账号 + 总计）。
+﻿// credit — TRAE SOLO 积分查询（全部账号 + 指定账号 + 总计）。
 //
 // 用法:
 //
@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/upstream"
 )
 
 type authFile struct {
@@ -162,7 +162,7 @@ func main() {
 		}
 	}
 	out := map[string]any{
-		"service": "traework2api",
+		"service": "trae2api-web",
 		"ts":      time.Now().Unix(),
 		"total": map[string]any{
 			"remain":   totalRemain,

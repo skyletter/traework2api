@@ -1,4 +1,4 @@
-package upstream
+﻿package upstream
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 func TestClassify(t *testing.T) {

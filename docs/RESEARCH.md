@@ -44,8 +44,8 @@
 
 | 类型 | 用途 | 反代可用 |
 |---|---|---|
-| `ide_credits` | SOLO 对话（`solo_work_lite`） | ✅ 本项目用的就是它 |
-| `work_credits` | TRAE Work 编程 Agent | ❌ 见 §4 |
+| `ide_credits` | SOLO 对话（`solo_work_lite`） | 可用（本项目采用） |
+| `work_credits` | TRAE Work 编程 Agent | 不可用（见下文说明） |
 
 - 额度查询：`POST /trae/api/v2/pay/ide_user_ent_usage`（聚合 `user_entitlement_pack_list[].entitlement_base_info.quota.credits_limit`，`usage.credits_amount` 为已用）
 - **注意**：`ide_user_ent_usage` 聚合的是 entitlement 包（含 work 包），显示 `remain=2000` 实为 work_credits，**不代表 SOLO 通道可用额度**。SOLO 真正看 `notify_usage.cn_credits_remain_info.ide_credits`

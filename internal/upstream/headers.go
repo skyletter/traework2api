@@ -1,10 +1,10 @@
-// headers.go SOLO 三类请求头：对话（SOLOHeaders）/ ug（UgHeaders）/ oauth（OAuthHeaders）。
+﻿// headers.go SOLO 三类请求头：对话（SOLOHeaders）/ ug（UgHeaders）/ oauth（OAuthHeaders）。
 package upstream
 
 import (
 	"net/http"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 const clientUA = "Trae/" + IdeVersion

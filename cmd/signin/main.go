@@ -1,4 +1,4 @@
-// signin 一次性批量签到工具：遍历 ./auths/trae-*.json 全部账号，
+﻿// signin 一次性批量签到工具：遍历 ./auths/trae-*.json 全部账号，
 // 自动 RefreshToken（过期时），逐个签到，顺手查积分。
 package main
 
@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/upstream"
 )
 
 type row struct {

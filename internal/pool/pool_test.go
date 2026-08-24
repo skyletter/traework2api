@@ -1,4 +1,4 @@
-package pool
+﻿package pool
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 func TestPickHighestCredits(t *testing.T) {

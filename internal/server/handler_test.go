@@ -1,4 +1,4 @@
-package server
+﻿package server
 
 import (
 	"encoding/json"
@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/pool"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 // 模拟 SOLO SSE 响应（glm-5.2 回答"你好"）。

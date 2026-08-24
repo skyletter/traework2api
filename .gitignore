@@ -19,6 +19,7 @@ tw2api
 !README.md
 docs/*
 !docs/RESEARCH.md
+!docs/logo.svg
 
 # 构建产物
 *.tmp
