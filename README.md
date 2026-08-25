@@ -2,6 +2,9 @@
 
 <img src="./docs/logo.svg" alt="trae2api-web logo" width="110" height="110" />
 
+> 基于上游 [https://github.com/Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) 改进。
+
+
 # trae2api-web
 
 **TRAE SOLO 逆向工程服务 · OpenAI 兼容 API · 可视化账号管理面板**
