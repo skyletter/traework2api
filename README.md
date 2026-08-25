@@ -2,8 +2,6 @@
 
 <img src="./docs/logo.svg" alt="trae2api-web logo" width="110" height="110" />
 
-> 基于上游 [https://github.com/Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) 改进。
-
 
 # trae2api-web
 
@@ -19,6 +17,8 @@
 
 ---
 
+> 基于上游 [https://github.com/Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) 改进。
+> 
 ## 概述
 
 `trae2api-web` 是一个将 TRAE SOLO 对话通道包装为标准 OpenAI 协议（`/v1/chat/completions` 与 `/v1/models`）的高性能反向代理服务。基于纯 Go 标准库构建，具备极低资源消耗与高并发处理能力。
