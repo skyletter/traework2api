@@ -1,0 +1,48 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "30 18 * * *" # 每天 UTC 18:30（北京时间 02:30）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync from upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Sliverkiss/traework2api.git
+          git fetch upstream main
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "Already up to date: $LOCAL"
+            exit 0
+          fi
+          echo "Upstream advanced: $LOCAL -> $UPSTREAM"
+          # merge 保留本仓库的 workflow 文件（上游无 .github/workflows，不会冲突）
+          git merge upstream/main --no-edit || {
+            echo "::error::合并冲突，请手动处理"
+            git merge --abort || true
+            exit 1
+          }
+          git push origin main
+          echo "PUSHED=1" >> "$GITHUB_ENV"
+
+      # GITHUB_TOKEN 的 push 不会触发其他 workflow，这里显式触发构建
+      - name: Trigger build
+        if: env.PUSHED == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref main

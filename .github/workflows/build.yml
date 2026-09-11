@@ -1,0 +1,79 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export per-arch image tars
+        run: |
+          docker buildx build --platform linux/amd64 -t tw2api:amd64 --load .
+          docker buildx build --platform linux/arm64 -t tw2api:arm64 --load .
+          docker save tw2api:amd64 | gzip > traework2api-linux-amd64.tar.gz
+          docker save tw2api:arm64 | gzip > traework2api-linux-arm64.tar.gz
+          ls -lh *.tar.gz
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: traework2api-*.tar.gz
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            traework2api-linux-amd64.tar.gz \
+            traework2api-linux-arm64.tar.gz \
+            --title "traework2api ${SHORT_SHA}" \
+            --notes "自动构建（commit ${SHORT_SHA}）。
+
+          - 镜像: ${IMAGE}:latest (linux/amd64, linux/arm64)
+          - NAS 离线导入: 下载对应架构 tar.gz，解压后 docker load < traework2api-xxx.tar
+
+          验证: docker run --rm traework2api:amd64 /app/tw2api -h || true"
