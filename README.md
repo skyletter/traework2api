@@ -18,7 +18,10 @@
 ---
 
 > 基于上游 [https://github.com/Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) 改进。
-> 
+>
+> **与上游的差异**：签到 9074 设备轮换与退避重试、签到极简请求头、
+> 回调 `data` 字段兼容、一键授权登录 UX。完整对照见 [docs/PORTING.md](docs/PORTING.md)。
+>
 ## 概述
 
 `trae2api-web` 是一个将 TRAE SOLO 对话通道包装为标准 OpenAI 协议（`/v1/chat/completions` 与 `/v1/models`）的高性能反向代理服务。基于纯 Go 标准库构建，具备极低资源消耗与高并发处理能力。
