@@ -344,3 +344,38 @@ func TestStateFileBackwardCompat(t *testing.T) {
 		t.Fatalf("old-format account should be pickable, got %+v", got)
 	}
 }
+
+func TestCheckinGenerationRotateAndReset(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	if g := p.CheckinGeneration("u1"); g != 0 {
+		t.Fatalf("initial generation=%d want 0", g)
+	}
+	if g := p.BumpCheckinGeneration("u1"); g != 1 {
+		t.Fatalf("after bump generation=%d want 1", g)
+	}
+	p.ResetCheckinGeneration("u1")
+	if g := p.CheckinGeneration("u1"); g != 0 {
+		t.Fatalf("after reset generation=%d want 0", g)
+	}
+	if g := p.CheckinGeneration("missing"); g != 0 {
+		t.Fatalf("missing account generation=%d want 0", g)
+	}
+	if g := p.BumpCheckinGeneration("missing"); g != 0 {
+		t.Fatalf("bump missing should be 0, got %d", g)
+	}
+}
+
+func TestCheckinGenerationPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BumpCheckinGeneration("u1")
+	p.BumpCheckinGeneration("u1")
+	q := New(fp)
+	q.Add(&auth.Auth{UID: "u1"})
+	if g := q.CheckinGeneration("u1"); g != 2 {
+		t.Fatalf("reloaded generation=%d want 2", g)
+	}
+}

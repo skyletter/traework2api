@@ -50,13 +50,14 @@ type Status struct {
 }
 
 type entry struct {
-	a        *auth.Auth
-	credits  int64
-	disabled bool // session dead 硬禁用
-	enabled  bool // 用户软开关（默认 true），false 时 Pick 跳过
-	reason   string
-	until    time.Time
-	errCount int
+	a          *auth.Auth
+	credits    int64
+	disabled   bool // session dead 硬禁用
+	enabled    bool // 用户软开关（默认 true），false 时 Pick 跳过
+	reason     string
+	until      time.Time
+	errCount   int
+	checkinGen int // 签到设备轮换代数（9074 限流时 +1，签到成功后清零）
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -71,11 +72,12 @@ func (e *entry) healthy(now time.Time) bool {
 
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
-	Credits  int64     `json:"credits"`
-	Disabled bool      `json:"disabled"`
-	Enabled  *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
-	Reason   string    `json:"reason,omitempty"`
-	Until    time.Time `json:"until,omitempty"`
+	Credits    int64     `json:"credits"`
+	Disabled   bool      `json:"disabled"`
+	Enabled    *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason     string    `json:"reason,omitempty"`
+	Until      time.Time `json:"until,omitempty"`
+	CheckinGen int       `json:"checkin_device_gen,omitempty"` // 旧文件缺省为 0（基线设备 ID）
 }
 
 // stateFile 持久化格式。
@@ -266,6 +268,40 @@ func (p *Pool) NoteSuccess(uid string) {
 	}
 }
 
+// CheckinGeneration 返回账号的签到设备轮换代数（未知账号或未轮换过为 0）。
+func (p *Pool) CheckinGeneration(uid string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok && e.checkinGen > 0 {
+		return e.checkinGen
+	}
+	return 0
+}
+
+// BumpCheckinGeneration 将签到设备代数 +1 并持久化（9074 限流后调用）；
+// 下次签到即换新设备 ID。不存在返回 0。
+func (p *Pool) BumpCheckinGeneration(uid string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return 0
+	}
+	e.checkinGen++
+	p.saveLocked()
+	return e.checkinGen
+}
+
+// ResetCheckinGeneration 签到成功后清零轮换代数（过期轮换不再保留）。
+func (p *Pool) ResetCheckinGeneration(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && e.checkinGen != 0 {
+		e.checkinGen = 0
+		p.saveLocked()
+	}
+}
+
 // Status 查询单账号状态。
 func (p *Pool) Status(uid string) (Status, bool) {
 	p.mu.RLock()
@@ -336,13 +372,18 @@ func (p *Pool) load() {
 		if s.Enabled != nil {
 			enabled = *s.Enabled
 		}
+		gen := s.CheckinGen
+		if gen < 0 {
+			gen = 0
+		}
 		p.byUID[uid] = &entry{
-			a:        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:  s.Credits,
-			disabled: s.Disabled,
-			enabled:  enabled,
-			reason:   s.Reason,
-			until:    s.Until,
+			a:          &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:    s.Credits,
+			disabled:   s.Disabled,
+			enabled:    enabled,
+			reason:     s.Reason,
+			until:      s.Until,
+			checkinGen: gen,
 		}
 	}
 }
@@ -354,10 +395,11 @@ func (p *Pool) saveLocked() {
 	sf := stateFile{Accounts: map[string]stateEntry{}}
 	for uid, e := range p.byUID {
 		se := stateEntry{
-			Credits:  e.credits,
-			Disabled: e.disabled,
-			Reason:   e.reason,
-			Until:    e.until,
+			Credits:    e.credits,
+			Disabled:   e.disabled,
+			Reason:     e.reason,
+			Until:      e.until,
+			CheckinGen: e.checkinGen,
 		}
 		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
 		if !e.enabled {

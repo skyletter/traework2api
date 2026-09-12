@@ -74,8 +74,9 @@ func main() {
 			_ = a.SaveAtomic()
 		}
 
-		// 签到
-		checkedIn, _, enable, serr := up.CheckinStatus(a)
+		// 签到（CLI 无代数持久化，始终用基线设备 ID；9074/业务码失败如实上报，不重试）
+		deviceID := upstream.CheckinDeviceID(upstream.CheckinIdentity(a), 0)
+		checkedIn, _, enable, serr := up.CheckinStatus(a, deviceID)
 		switch {
 		case serr != nil:
 			if isAlready(serr.Error()) {
@@ -96,7 +97,7 @@ func main() {
 			r.detail = "checkin disabled"
 			failN++
 		default:
-			if err := up.CheckinClaim(a); err != nil {
+			if err := up.CheckinClaim(a, deviceID); err != nil {
 				r.status = "FAIL"
 				r.detail = short(err.Error())
 				failN++

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 //go:embed admin.html
@@ -60,7 +61,8 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 			} else {
 				ac.Remain, ac.Limit, ac.Used, ac.Packs = remain, limit, used, packs
 			}
-			checkedIn, credits, enable, cerr := h.cfg.Upstream.CheckinStatus(a)
+			deviceID := upstream.CheckinDeviceID(upstream.CheckinIdentity(a), h.cfg.Pool.CheckinGeneration(s.UID))
+			checkedIn, credits, enable, cerr := h.cfg.Upstream.CheckinStatus(a, deviceID)
 			if cerr != nil {
 				if ac.Error != "" {
 					ac.Error += "; "

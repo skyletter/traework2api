@@ -2,6 +2,9 @@
 package upstream
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"math/big"
 	"net/http"
 
 	"trae2api-web/internal/auth"
@@ -54,6 +57,32 @@ func UgHeaders(req *http.Request, a *auth.Auth) {
 	if a.DeviceID != "" {
 		req.Header.Set("X-Device-Id", a.DeviceID)
 	}
+}
+
+// CheckinIdentity 返回签到设备派生的账号稳定标识：UID 优先（与 JWT data.id
+// 同源，token 刷新不变），缺失时回退登录 DeviceID。
+func CheckinIdentity(a *auth.Auth) string {
+	if a.UID != "" {
+		return a.UID
+	}
+	return a.DeviceID
+}
+
+// CheckinDeviceID 返回账号稳定的签到设备 ID（16 位数字）。
+// generation 为 9074 限流后的轮换代数（0 = 基线）。
+// 算法复刻 Trae2api-cn：sha256(identity[#genN]) 取模 1e16，零填充 16 位。
+func CheckinDeviceID(identity string, generation int) string {
+	if identity == "" {
+		return ""
+	}
+	material := identity
+	if generation > 0 {
+		material = fmt.Sprintf("%s#gen%d", identity, generation)
+	}
+	sum := sha256.Sum256([]byte(material))
+	n := new(big.Int).SetBytes(sum[:])
+	n.Mod(n, big.NewInt(1e16))
+	return fmt.Sprintf("%016d", n)
 }
 
 // OAuthHeaders 设置 ExchangeToken / GetUserInfo 所需头（无签名，仅 UA）。

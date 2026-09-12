@@ -5,6 +5,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -319,13 +320,22 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
-// CheckinStatus 查询签到状态。
-func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
+// ErrCheckinRateLimited 上游签到设备级限流（业务码 9074）。
+// 同一设备 ID 短时间内重复领取会延长限流窗口，调用方应轮换设备 ID
+// 并延后到下次定时任务重试，不得立即重发。
+var ErrCheckinRateLimited = errors.New("checkin rate limited (9074)")
+
+// CheckinStatus 查询签到状态。deviceID 为签到专用设备 ID
+// （CheckinDeviceID 派生），非空时覆盖 UgHeaders 的登录 DeviceID。
+func (c *Client) CheckinStatus(a *auth.Auth, deviceID string) (checkedIn bool, credits int64, enable bool, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return false, 0, false, err
 	}
 	UgHeaders(req, a)
+	if deviceID != "" {
+		req.Header.Set("X-Device-Id", deviceID)
+	}
 	data, err := c.doJSON(req)
 	if err != nil {
 		return false, 0, false, err
@@ -341,15 +351,37 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 	return resp.CheckedIn, resp.Credits, resp.Enable, nil
 }
 
-// CheckinClaim 执行签到。
-func (c *Client) CheckinClaim(a *auth.Auth) error {
+// CheckinClaim 执行签到。上游用 HTTP 200 + 业务码返回结果，
+// 因此必须检查 code：0 成功；9074 设备限流（ErrCheckinRateLimited）；
+// 其他非零码一律报错（此前会把 9004 等失败误报为成功）。
+func (c *Client) CheckinClaim(a *auth.Auth, deviceID string) error {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return err
 	}
 	UgHeaders(req, a)
-	_, err = c.doJSON(req)
-	return err
+	if deviceID != "" {
+		req.Header.Set("X-Device-Id", deviceID)
+	}
+	data, err := c.doJSON(req)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Code    int64  `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fmt.Errorf("checkin claim parse: %w", err)
+	}
+	switch resp.Code {
+	case 0:
+		return nil
+	case 9074:
+		return fmt.Errorf("checkin claim %d: %s: %w", resp.Code, resp.Message, ErrCheckinRateLimited)
+	default:
+		return fmt.Errorf("checkin claim code %d: %s", resp.Code, resp.Message)
+	}
 }
 
 // UserEntUsage 聚合积分（ide_user_ent_usage 的 credits_limit 求和）。

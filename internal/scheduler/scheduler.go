@@ -97,18 +97,29 @@ func (s *Scheduler) RunCheckinNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		// 签到（status → 未签到则 claim）
-		checkedIn, _, enable, err := s.cfg.Upstream.CheckinStatus(a)
+		// 签到（status → 未签到则 claim）。
+		// 9074 为设备级限流：轮换签到设备代数并等下次定时任务重试，
+		// 不得立即重发（短时间内重复领取会延长上游限流窗口）。
+		identity := upstream.CheckinIdentity(a)
+		gen := s.cfg.Pool.CheckinGeneration(st.UID)
+		deviceID := upstream.CheckinDeviceID(identity, gen)
+		checkedIn, _, enable, err := s.cfg.Upstream.CheckinStatus(a, deviceID)
 		if err != nil {
 			log.Printf("checkin status %s: %v", st.UID, err)
-		} else if !checkedIn && enable {
-			if err := s.cfg.Upstream.CheckinClaim(a); err != nil {
-				log.Printf("checkin claim %s: %v", st.UID, err)
+		} else if checkedIn {
+			s.cfg.Pool.ResetCheckinGeneration(st.UID)
+			log.Printf("checkin %s: already checked in", st.UID)
+		} else if enable {
+			if err := s.cfg.Upstream.CheckinClaim(a, deviceID); err != nil {
+				if errors.Is(err, upstream.ErrCheckinRateLimited) {
+					newGen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
+					log.Printf("checkin claim %s: rate limited (9074), rotated device to gen %d; retry next run", st.UID, newGen)
+				} else {
+					log.Printf("checkin claim %s: %v", st.UID, err)
+				}
 			} else {
 				log.Printf("checkin %s: ok", st.UID)
 			}
-		} else if checkedIn {
-			log.Printf("checkin %s: already checked in", st.UID)
 		}
 		// 查积分 + 解冻
 		remain, err := s.cfg.Upstream.UserEntUsage(a)

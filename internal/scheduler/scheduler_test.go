@@ -187,3 +187,62 @@ func TestRunRefreshSessionDeadDisables(t *testing.T) {
 		t.Errorf("should disable session-dead account: %+v", st)
 	}
 }
+
+func TestRunCheckinRotatesDeviceOnRateLimit(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 500}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			f.checkinCalls.Add(1)
+			w.Write([]byte(`{"checked_in":false,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/claim"):
+			f.claimCalls.Add(1)
+			w.Write([]byte(`{"code":9074,"message":"too many users"}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	s := newTestScheduler(f, p, srv)
+	s.RunCheckinNow()
+	if f.claimCalls.Load() != 1 {
+		t.Fatalf("claim calls=%d want exactly 1 (no immediate retry on 9074)", f.claimCalls.Load())
+	}
+	if g := p.CheckinGeneration("u1"); g != 1 {
+		t.Errorf("generation=%d want 1 after 9074 rotation", g)
+	}
+}
+
+func TestRunCheckinResetsGenerationWhenCheckedIn(t *testing.T) {
+	f := &fakeUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			f.checkinCalls.Add(1)
+			w.Write([]byte(`{"checked_in":true,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.BumpCheckinGeneration("u1")
+	p.BumpCheckinGeneration("u1")
+	s := newTestScheduler(f, p, srv)
+	s.RunCheckinNow()
+	if g := p.CheckinGeneration("u1"); g != 0 {
+		t.Errorf("generation=%d want 0 after checked-in", g)
+	}
+	if f.claimCalls.Load() != 0 {
+		t.Errorf("claim calls=%d want 0 when already checked in", f.claimCalls.Load())
+	}
+}
