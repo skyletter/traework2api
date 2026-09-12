@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -218,7 +219,7 @@ func TestRunCheckinRotatesDeviceOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestRunCheckinResetsGenerationWhenCheckedIn(t *testing.T) {
+func TestRunCheckinKeepsGenerationWhenCheckedIn(t *testing.T) {
 	f := &fakeUpstream{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -239,10 +240,77 @@ func TestRunCheckinResetsGenerationWhenCheckedIn(t *testing.T) {
 	p.BumpCheckinGeneration("u1")
 	s := newTestScheduler(f, p, srv)
 	s.RunCheckinNow()
-	if g := p.CheckinGeneration("u1"); g != 0 {
-		t.Errorf("generation=%d want 0 after checked-in", g)
+	if g := p.CheckinGeneration("u1"); g != 2 {
+		t.Errorf("generation=%d want 2 (upstream keeps generation, only backoff retires)", g)
 	}
 	if f.claimCalls.Load() != 0 {
 		t.Errorf("claim calls=%d want 0 when already checked in", f.claimCalls.Load())
+	}
+}
+
+func TestRunCheckinStatusRateLimitedRotates(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls := 0
+	claimCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			statusCalls++
+			if statusCalls == 1 {
+				w.Write([]byte(`{"code":9074,"message":"too many users"}`))
+				return
+			}
+			w.Write([]byte(`{"checked_in":false,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/claim"):
+			claimCalls++
+			w.Write([]byte(`{"code":0,"message":"success"}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), AgentHost: srv.URL, UgHost: srv.URL, OAuthHost: srv.URL, ClientID: upstream.ClientID}
+	s := New(Config{Pool: p, Upstream: up, CheckinHour: 9, RefreshHours: []int{3}, RefreshSkew: time.Hour})
+	s.RunCheckinNow()
+	if g := p.CheckinGeneration("u1"); g != 1 {
+		t.Errorf("generation=%d want 1 after status-9074 rotation", g)
+	}
+	if claimCalls != 1 {
+		t.Errorf("claim calls=%d want 1 (retry with rotated id)", claimCalls)
+	}
+}
+
+func TestRunCheckinPinnedDeviceNeverRotates(t *testing.T) {
+	t.Setenv("TRAE_CHECKIN_DEVICE_ID", "pinned-device-1")
+	f := &fakeUpstream{resourceRemain: 500}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			f.checkinCalls.Add(1)
+			w.Write([]byte(`{"checked_in":false,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/claim"):
+			f.claimCalls.Add(1)
+			w.Write([]byte(`{"code":9074,"message":"too many users"}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	s := newTestScheduler(f, p, srv)
+	s.RunCheckinNow()
+	if g := p.CheckinGeneration("u1"); g != 0 {
+		t.Errorf("generation=%d want 0 (pinned device must not rotate)", g)
 	}
 }

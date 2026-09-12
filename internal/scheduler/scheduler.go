@@ -98,20 +98,27 @@ func (s *Scheduler) RunCheckinNow() {
 			continue
 		}
 		// 签到（status → 未签到则 claim）。
-		// 9074 为设备级限流：轮换签到设备代数并等下次定时任务重试，
-		// 不得立即重发（短时间内重复领取会延长上游限流窗口）。
+		// 9074 为设备级限流：轮换签到设备代数；status 限流时换 ID 重查一次，
+		// claim 限流则等下次定时任务（短时间内重复领取会延长上游限流窗口）。
+		// 操作员 pin 的设备 ID 永不轮换。
+		// Source: autumnsentiment/Trae2api-cn @ 2403954 (intraday 重试) + @ 78cd9d5953 (代数保持)
+		// Divergence: 仅次日定时重试，无 60s 后台循环（见 Phase 3 退避计划）。
 		identity := upstream.CheckinIdentity(a)
-		gen := s.cfg.Pool.CheckinGeneration(st.UID)
-		deviceID := upstream.CheckinDeviceID(identity, gen)
+		deviceID, pinned := upstream.CheckinDevice(identity, s.cfg.Pool.CheckinGeneration(st.UID))
 		checkedIn, _, enable, err := s.cfg.Upstream.CheckinStatus(a, deviceID)
+		if errors.Is(err, upstream.ErrCheckinRateLimited) && !pinned {
+			gen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
+			deviceID, _ = upstream.CheckinDevice(identity, gen)
+			log.Printf("checkin status %s: rate limited (9074), rotated device to gen %d", st.UID, gen)
+			checkedIn, _, enable, err = s.cfg.Upstream.CheckinStatus(a, deviceID)
+		}
 		if err != nil {
 			log.Printf("checkin status %s: %v", st.UID, err)
 		} else if checkedIn {
-			s.cfg.Pool.ResetCheckinGeneration(st.UID)
 			log.Printf("checkin %s: already checked in", st.UID)
 		} else if enable {
 			if err := s.cfg.Upstream.CheckinClaim(a, deviceID); err != nil {
-				if errors.Is(err, upstream.ErrCheckinRateLimited) {
+				if errors.Is(err, upstream.ErrCheckinRateLimited) && !pinned {
 					newGen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
 					log.Printf("checkin claim %s: rate limited (9074), rotated device to gen %d; retry next run", st.UID, newGen)
 				} else {

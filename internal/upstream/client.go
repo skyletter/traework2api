@@ -326,29 +326,37 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 var ErrCheckinRateLimited = errors.New("checkin rate limited (9074)")
 
 // CheckinStatus 查询签到状态。deviceID 为签到专用设备 ID
-// （CheckinDeviceID 派生），非空时覆盖 UgHeaders 的登录 DeviceID。
+// （CheckinDevice 派生或操作员 pin）。
+// 上游同样用 HTTP 200 + 业务码：9074 返回 ErrCheckinRateLimited
+// （调用方应轮换设备 ID），其他非零码一律报错。
 func (c *Client) CheckinStatus(a *auth.Auth, deviceID string) (checkedIn bool, credits int64, enable bool, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return false, 0, false, err
 	}
-	UgHeaders(req, a)
-	if deviceID != "" {
-		req.Header.Set("X-Device-Id", deviceID)
-	}
+	CheckinHeaders(req, a, deviceID)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return false, 0, false, err
 	}
 	var resp struct {
-		CheckedIn bool  `json:"checked_in"`
-		Credits   int64 `json:"credits"`
-		Enable    bool  `json:"enable"`
+		Code      int64  `json:"code"`
+		Message   string `json:"message"`
+		CheckedIn bool   `json:"checked_in"`
+		Credits   int64  `json:"credits"`
+		Enable    bool   `json:"enable"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return false, 0, false, fmt.Errorf("checkin status parse: %w", err)
 	}
-	return resp.CheckedIn, resp.Credits, resp.Enable, nil
+	switch resp.Code {
+	case 0:
+		return resp.CheckedIn, resp.Credits, resp.Enable, nil
+	case 9074:
+		return false, 0, false, fmt.Errorf("checkin status %d: %s: %w", resp.Code, resp.Message, ErrCheckinRateLimited)
+	default:
+		return false, 0, false, fmt.Errorf("checkin status code %d: %s", resp.Code, resp.Message)
+	}
 }
 
 // CheckinClaim 执行签到。上游用 HTTP 200 + 业务码返回结果，
@@ -359,10 +367,7 @@ func (c *Client) CheckinClaim(a *auth.Auth, deviceID string) error {
 	if err != nil {
 		return err
 	}
-	UgHeaders(req, a)
-	if deviceID != "" {
-		req.Header.Set("X-Device-Id", deviceID)
-	}
+	CheckinHeaders(req, a, deviceID)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err

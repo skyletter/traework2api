@@ -345,7 +345,7 @@ func TestStateFileBackwardCompat(t *testing.T) {
 	}
 }
 
-func TestCheckinGenerationRotateAndReset(t *testing.T) {
+func TestCheckinGenerationRotateOnly(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	if g := p.CheckinGeneration("u1"); g != 0 {
@@ -354,9 +354,9 @@ func TestCheckinGenerationRotateAndReset(t *testing.T) {
 	if g := p.BumpCheckinGeneration("u1"); g != 1 {
 		t.Fatalf("after bump generation=%d want 1", g)
 	}
-	p.ResetCheckinGeneration("u1")
-	if g := p.CheckinGeneration("u1"); g != 0 {
-		t.Fatalf("after reset generation=%d want 0", g)
+	// 上游从不清零代数（只清退避）：轮换后保持，下次继续用新设备 ID。
+	if g := p.CheckinGeneration("u1"); g != 1 {
+		t.Fatalf("generation=%d want sticky 1 (never reset)", g)
 	}
 	if g := p.CheckinGeneration("missing"); g != 0 {
 		t.Fatalf("missing account generation=%d want 0", g)

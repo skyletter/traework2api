@@ -292,16 +292,6 @@ func (p *Pool) BumpCheckinGeneration(uid string) int {
 	return e.checkinGen
 }
 
-// ResetCheckinGeneration 签到成功后清零轮换代数（过期轮换不再保留）。
-func (p *Pool) ResetCheckinGeneration(uid string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok && e.checkinGen != 0 {
-		e.checkinGen = 0
-		p.saveLocked()
-	}
-}
-
 // Status 查询单账号状态。
 func (p *Pool) Status(uid string) (Status, bool) {
 	p.mu.RLock()

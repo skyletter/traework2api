@@ -252,8 +252,17 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	var path string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		path = r.URL.Path
-		if r.Header.Get("X-User-Region") != "CN" {
-			return nil, errors.New("missing X-User-Region")
+		if got := r.Header.Get("X-Device-Brand"); got != "83DG" {
+			return nil, errors.New("missing X-Device-Brand 83DG, got " + got)
+		}
+		if got := r.Header.Get("X-Device-Type"); got != "windows" {
+			return nil, errors.New("missing X-Device-Type windows, got " + got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "" {
+			return nil, errors.New("checkin must not send User-Agent, got " + got)
+		}
+		if got := r.Header.Get("X-User-Region"); got != "" {
+			return nil, errors.New("checkin must not send X-User-Region, got " + got)
 		}
 		return jsonResp(200, `{"checked_in":false,"credits":200,"enable":true}`), nil
 	})
@@ -266,6 +275,44 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 	if path != EpCheckinStatus {
 		t.Errorf("path=%s", path)
+	}
+}
+
+func TestCheckinStatusRateLimited(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":9074,"message":"当前使用人数太多，请稍后再试"}`), nil
+	})
+	_, _, _, err := c.CheckinStatus(&auth.Auth{AccessToken: "at"}, CheckinDeviceID("u1", 0))
+	if !errors.Is(err, ErrCheckinRateLimited) {
+		t.Fatalf("status 9074 err=%v want ErrCheckinRateLimited (else scheduler skips rotation)", err)
+	}
+}
+
+func TestCheckinDevicePin(t *testing.T) {
+	t.Setenv("TRAE_CHECKIN_DEVICE_ID", "pinned-device-1")
+	id, pinned := CheckinDevice("u1", 3)
+	if !pinned || id != "pinned-device-1" {
+		t.Fatalf("env pin ignored: id=%q pinned=%v", id, pinned)
+	}
+}
+
+func TestCheckinDevicePinPerAccount(t *testing.T) {
+	t.Setenv("TRAE_CHECKIN_DEVICE_IDS_JSON", `{"u1":"per-acct-9"}`)
+	id, pinned := CheckinDevice("u1", 0)
+	if !pinned || id != "per-acct-9" {
+		t.Fatalf("per-account pin ignored: id=%q pinned=%v", id, pinned)
+	}
+	if id2, pinned2 := CheckinDevice("u2", 0); pinned2 || id2 == "" || id2 == "per-acct-9" {
+		t.Errorf("unlisted account must derive, got id=%q pinned=%v", id2, pinned2)
+	}
+}
+
+func TestCheckinDeviceDerived(t *testing.T) {
+	t.Setenv("TRAE_CHECKIN_DEVICE_ID", "")
+	t.Setenv("TRAE_CHECKIN_DEVICE_IDS_JSON", "")
+	id, pinned := CheckinDevice("u1", 0)
+	if pinned || id != CheckinDeviceID("u1", 0) {
+		t.Errorf("no pin must derive baseline: id=%q pinned=%v", id, pinned)
 	}
 }
 
