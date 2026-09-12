@@ -1,4 +1,4 @@
-﻿// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
+// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
@@ -66,6 +66,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	go sch.RetryLoop(ctx, 15*time.Minute) // 9074 退避到期的 intraday 签到重试
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

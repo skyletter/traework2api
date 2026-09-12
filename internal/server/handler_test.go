@@ -1,4 +1,4 @@
-﻿package server
+package server
 
 import (
 	"encoding/json"
@@ -229,17 +229,37 @@ func TestModelsEndpoint(t *testing.T) {
 		t.Errorf("object=%v", resp["object"])
 	}
 	data := resp["data"].([]any)
-	if len(data) != 32 {
-		t.Errorf("models count=%d want 32", len(data))
+	if len(data) != 33 {
+		t.Errorf("models count=%d want 33", len(data))
 	}
-	found := false
+	ids := map[string]bool{}
 	for _, m := range data {
-		if m.(map[string]any)["id"] == "glm-5.2" {
-			found = true
+		ids[m.(map[string]any)["id"].(string)] = true
+	}
+	for _, retired := range []string{"sagitta", "aquila", "Doubao-Seed-2.0-Code", "glm-5", "glm-5-turbo"} {
+		if ids[retired] {
+			t.Errorf("retired model %s must not be served", retired)
 		}
 	}
-	if !found {
-		t.Error("glm-5.2 missing")
+	for _, fresh := range []string{"glm-5.3", "qwen3.8-flash", "qwen3.8-max", "Doubao-Seed-Code", "Doubao-Seed-Evolving", "DeepSeek-V4-Pro-Official", "glm-5.2"} {
+		if !ids[fresh] {
+			t.Errorf("model %s missing from fallback", fresh)
+		}
+	}
+}
+
+func TestChatModelConfigMismatchDoesNotCool(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":4001,"message":"model config is empty"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrCount != 0 {
+		t.Errorf("model-function mismatch must not cool the account: %+v", st)
 	}
 }
 

@@ -287,6 +287,84 @@ func TestRunCheckinStatusRateLimitedRotates(t *testing.T) {
 	}
 }
 
+func TestRunCheckinRetriesDueAccount(t *testing.T) {
+	claimCalls := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			w.Write([]byte(`{"checked_in":false,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/claim"):
+			claimCalls.Add(1)
+			w.Write([]byte(`{"code":0,"message":"success"}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	s := newTestScheduler(&fakeUpstream{resourceRemain: 500}, p, srv)
+	s.RunCheckinRetries()
+	if claimCalls.Load() != 0 {
+		t.Fatalf("no due retry must not claim, calls=%d", claimCalls.Load())
+	}
+	p.NoteCheckinRateLimited("u1")
+	// 人为将退避截止提前到过去，模拟到达重试时间（避免测试 sleep）。
+	p.SetCheckinRetryAfterForTest("u1", time.Now().Add(-time.Second))
+	s.RunCheckinRetries()
+	if claimCalls.Load() != 1 {
+		t.Fatalf("due retry must claim once, calls=%d", claimCalls.Load())
+	}
+	if p.CheckinRetryDue("u1") {
+		t.Fatal("successful retry must clear backoff")
+	}
+}
+
+func TestRunCheckinRefreshesRevokedTokenOnce(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls, refreshCalls := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/checkin_credits/status"):
+			statusCalls++
+			if statusCalls == 1 {
+				w.WriteHeader(401)
+				w.Write([]byte(`{"code":1001,"message":"login required"}`))
+				return
+			}
+			w.Write([]byte(`{"checked_in":true,"credits":200,"enable":true}`))
+		case strings.HasSuffix(r.URL.Path, "/ExchangeToken"):
+			refreshCalls++
+			w.Write([]byte(`{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1999999999,"TokenExpireDuration":1209600}}`))
+		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
+			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500}}}]}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt", ExpiresAt: 9999999999, ApiHost: srv.URL})
+	up := &upstream.Client{HTTP: srv.Client(), AgentHost: srv.URL, UgHost: srv.URL, OAuthHost: srv.URL, ClientID: upstream.ClientID}
+	s := New(Config{Pool: p, Upstream: up, CheckinHour: 9, RefreshHours: []int{3}, RefreshSkew: time.Hour})
+	s.RunCheckinNow()
+	if refreshCalls != 1 {
+		t.Errorf("refresh calls=%d want exactly 1", refreshCalls)
+	}
+	if statusCalls != 2 {
+		t.Errorf("status calls=%d want 2 (fail + retry)", statusCalls)
+	}
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Errorf("revoked-but-refreshable account must not be disabled: %+v", st)
+	}
+}
+
 func TestRunCheckinPinnedDeviceNeverRotates(t *testing.T) {
 	t.Setenv("TRAE_CHECKIN_DEVICE_ID", "pinned-device-1")
 	f := &fakeUpstream{resourceRemain: 500}

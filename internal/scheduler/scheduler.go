@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
+	"trae2api-web/internal/auth"
 	"trae2api-web/internal/pool"
 	"trae2api-web/internal/upstream"
 )
@@ -97,45 +99,126 @@ func (s *Scheduler) RunCheckinNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		// 签到（status → 未签到则 claim）。
-		// 9074 为设备级限流：轮换签到设备代数；status 限流时换 ID 重查一次，
-		// claim 限流则等下次定时任务（短时间内重复领取会延长上游限流窗口）。
-		// 操作员 pin 的设备 ID 永不轮换。
-		// Source: autumnsentiment/Trae2api-cn @ 2403954 (intraday 重试) + @ 78cd9d5953 (代数保持)
-		// Divergence: 仅次日定时重试，无 60s 后台循环（见 Phase 3 退避计划）。
-		identity := upstream.CheckinIdentity(a)
-		deviceID, pinned := upstream.CheckinDevice(identity, s.cfg.Pool.CheckinGeneration(st.UID))
-		checkedIn, _, enable, err := s.cfg.Upstream.CheckinStatus(a, deviceID)
-		if errors.Is(err, upstream.ErrCheckinRateLimited) && !pinned {
-			gen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
-			deviceID, _ = upstream.CheckinDevice(identity, gen)
-			log.Printf("checkin status %s: rate limited (9074), rotated device to gen %d", st.UID, gen)
-			checkedIn, _, enable, err = s.cfg.Upstream.CheckinStatus(a, deviceID)
-		}
-		if err != nil {
-			log.Printf("checkin status %s: %v", st.UID, err)
-		} else if checkedIn {
-			log.Printf("checkin %s: already checked in", st.UID)
-		} else if enable {
-			if err := s.cfg.Upstream.CheckinClaim(a, deviceID); err != nil {
-				if errors.Is(err, upstream.ErrCheckinRateLimited) && !pinned {
-					newGen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
-					log.Printf("checkin claim %s: rate limited (9074), rotated device to gen %d; retry next run", st.UID, newGen)
-				} else {
-					log.Printf("checkin claim %s: %v", st.UID, err)
-				}
-			} else {
-				log.Printf("checkin %s: ok", st.UID)
-			}
-		}
-		// 查积分 + 解冻
-		remain, err := s.cfg.Upstream.UserEntUsage(a)
-		if err != nil {
-			log.Printf("ent-usage %s: %v", st.UID, err)
+		s.checkinAccount(st, a)
+		s.refreshCredits(st, a)
+	}
+}
+
+// RunCheckinRetries 对退避到期的账号补一次签到（intraday 重试）。
+// 退避公式与持久化见 pool.NoteCheckinRateLimited；成功/已签到清零。
+// Source: autumnsentiment/Trae2api-cn @ 2403954 + @ 165ac6e
+func (s *Scheduler) RunCheckinRetries() {
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
 			continue
 		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		if !s.cfg.Pool.CheckinRetryDue(st.UID) {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshTokenValue() == "" {
+			continue
+		}
+		s.checkinAccount(st, a)
+		s.refreshCredits(st, a)
 	}
+}
+
+// RetryLoop 每 interval 扫一次到期重试；ctx 取消时返回。
+func (s *Scheduler) RetryLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.RunCheckinRetries()
+		}
+	}
+}
+
+// checkinAccount 单账号一次 status→claim。9074 时轮换设备并记录退避
+// （status 限流换 ID 重查一次，claim 限流等退避到期）；成功/已签到清零退避。
+func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) {
+	identity := upstream.CheckinIdentity(a)
+	deviceID, pinned := upstream.CheckinDevice(identity, s.cfg.Pool.CheckinGeneration(st.UID))
+	checkedIn, _, enable, err := s.statusWithRefresh(a, deviceID)
+	if errors.Is(err, upstream.ErrCheckinRateLimited) && !pinned {
+		gen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
+		deviceID, _ = upstream.CheckinDevice(identity, gen)
+		log.Printf("checkin status %s: rate limited (9074), rotated device to gen %d", st.UID, gen)
+		checkedIn, _, enable, err = s.statusWithRefresh(a, deviceID)
+	}
+	if err != nil {
+		log.Printf("checkin status %s: %v", st.UID, err)
+		return
+	}
+	if checkedIn {
+		s.cfg.Pool.ClearCheckinRetry(st.UID)
+		log.Printf("checkin %s: already checked in", st.UID)
+		return
+	}
+	if !enable {
+		return
+	}
+	if err := s.cfg.Upstream.CheckinClaim(a, deviceID); err != nil {
+		if errors.Is(err, upstream.ErrCheckinRateLimited) {
+			if !pinned {
+				newGen := s.cfg.Pool.BumpCheckinGeneration(st.UID)
+				log.Printf("checkin claim %s: rate limited (9074), rotated device to gen %d", st.UID, newGen)
+			}
+			after := s.cfg.Pool.NoteCheckinRateLimited(st.UID)
+			log.Printf("checkin claim %s: retry after %s", st.UID, after.Format("15:04:05"))
+		} else {
+			log.Printf("checkin claim %s: %v", st.UID, err)
+		}
+		return
+	}
+	s.cfg.Pool.ClearCheckinRetry(st.UID)
+	log.Printf("checkin %s: ok", st.UID)
+}
+
+// statusWithRefresh 查签到状态；401/1001 认证失败时刷新 token 落盘后只重试一次。
+// Source: autumnsentiment/Trae2api-cn @ 87a510a（失败刷新重试一次）。
+// 用 RefreshToken（无条件换新；吊销的 token 不会触发 NeedsRefresh），
+// 持锁串行，调用方不得并发对同一账号调此函数。
+func (s *Scheduler) statusWithRefresh(a *auth.Auth, deviceID string) (bool, int64, bool, error) {
+	checkedIn, credits, enable, err := s.cfg.Upstream.CheckinStatus(a, deviceID)
+	if err == nil || !isCheckinAuthFailure(err) {
+		return checkedIn, credits, enable, err
+	}
+	uid := a.UID
+	if rerr := s.cfg.Upstream.RefreshToken(a); rerr != nil {
+		return false, 0, false, err
+	}
+	if serr := a.SaveAtomic(); serr != nil {
+		log.Printf("checkin %s refresh save: %v", uid, serr)
+	}
+	return s.cfg.Upstream.CheckinStatus(a, deviceID)
+}
+
+// isCheckinAuthFailure 报告签到错误是否为认证失效（HTTP 401 会话失效，
+// 或业务码 1001）。其他业务码（9074/9004/9095 等）不是。
+func isCheckinAuthFailure(err error) bool {
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+		return true
+	}
+	return strings.Contains(err.Error(), "1001")
+}
+
+// refreshCredits 查积分 + 解冻（有积分的冷却账号恢复）。
+func (s *Scheduler) refreshCredits(st pool.Status, a *auth.Auth) {
+	remain, err := s.cfg.Upstream.UserEntUsage(a)
+	if err != nil {
+		log.Printf("ent-usage %s: %v", st.UID, err)
+		return
+	}
+	s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 }
 
 // RunRefreshNow 立即对所有账号刷新 token；session 失效的自动禁用。
@@ -148,15 +231,18 @@ func (s *Scheduler) RunRefreshNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		if !a.NeedsRefresh(s.cfg.RefreshSkew) {
-			continue
-		}
-		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+		// 持锁内重查，避免与签到路径的刷新并发重复 ExchangeToken。
+		// 注意：失败时返回 (false, err)，必须先判 err 再判 refreshed。
+		refreshed, err := s.cfg.Upstream.RefreshTokenIfNeeded(a, s.cfg.RefreshSkew)
+		if err != nil {
 			log.Printf("refresh %s: %v", st.UID, err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 				s.cfg.Pool.Disable(st.UID, "session dead")
 			}
+			continue
+		}
+		if !refreshed {
 			continue
 		}
 		if err := a.SaveAtomic(); err != nil {

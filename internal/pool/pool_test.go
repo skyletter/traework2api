@@ -366,6 +366,47 @@ func TestCheckinGenerationRotateOnly(t *testing.T) {
 	}
 }
 
+func TestCheckinRetryBackoffGrowsAndCaps(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	if p.CheckinRetryDue("u1") {
+		t.Fatal("fresh account must not be retry-due (daily run owns first attempt)")
+	}
+	after1 := p.NoteCheckinRateLimited("u1")
+	if p.CheckinRetryDue("u1") {
+		t.Fatal("just-recorded backoff must not be due")
+	}
+	d1 := time.Until(after1)
+	if d1 < 50*time.Second || d1 > 70*time.Second {
+		t.Errorf("first backoff=%v want ~60s", d1)
+	}
+	// 退避按 60→120→240→480 增长并封顶（Source: Trae2api-cn @ 165ac6e）。
+	want := []time.Duration{120 * time.Second, 240 * time.Second, 480 * time.Second, 480 * time.Second}
+	for i, w := range want {
+		after := p.NoteCheckinRateLimited("u1")
+		if d := time.Until(after); d < w-10*time.Second || d > w+10*time.Second {
+			t.Errorf("backoff step %d=%v want ~%v", i+2, d, w)
+		}
+	}
+	p.ClearCheckinRetry("u1")
+	if p.CheckinRetryDue("u1") {
+		t.Fatal("cleared retry must not be due")
+	}
+}
+
+func TestCheckinRetryPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteCheckinRateLimited("u1")
+	q := New(fp)
+	q.Add(&auth.Auth{UID: "u1"})
+	if q.CheckinRetryDue("u1") {
+		t.Fatal("reloaded backoff must still be pending (restart must not re-hammer upstream)")
+	}
+}
+
 func TestCheckinGenerationPersistsAcrossReload(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")

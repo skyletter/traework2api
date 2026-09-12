@@ -278,6 +278,24 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 }
 
+func TestIsModelConfigMismatch(t *testing.T) {
+	if !IsModelConfigMismatch(400, `{"code":4001,"message":"model config is empty"}`) {
+		t.Error("4001 model-config-empty must match")
+	}
+	if IsModelConfigMismatch(400, `{"code":4001,"message":"We're sorry, the param is invalid."}`) {
+		t.Error("other 4001 messages must not match")
+	}
+	if IsModelConfigMismatch(400, `{"code":40012,"message":"model config is empty"}`) {
+		t.Error("40012 must not match 4001 (non-digit guard)")
+	}
+	if IsModelConfigMismatch(429, `{"code":4001,"message":"model config is empty"}`) {
+		t.Error("non-400 status must not match")
+	}
+	if IsModelConfigMismatch(400, `{"message":"model config is empty"}`) {
+		t.Error("missing code must not match")
+	}
+}
+
 func TestCheckinStatusRateLimited(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"code":9074,"message":"当前使用人数太多，请稍后再试"}`), nil

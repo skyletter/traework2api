@@ -92,6 +92,35 @@ func Classify(status int, body string) ErrKind {
 	return ErrNone
 }
 
+// IsModelConfigMismatch 报告是否为"模型在当前 function 下不可用"
+// （SOLO 业务码 4001 + model config is empty）。
+// 这是模型问题而非账号问题，调用方不得冷却/计数该账号。
+// Source: smart-open/TraeWorkAssistant models_sync.rs（solo_agent-only 模型实测）
+// 与 muskke/trae-api-proxy 最小请求 4001 规则（双源佐证机制；
+// 具体哪三个模型需 solo_agent 为单源断言，本服务不切换 function）。
+func IsModelConfigMismatch(status int, body string) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var v struct {
+		Code    json.Number `json:"code"`
+		Message string      `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		return false
+	}
+	// code 必须精确等于 4001（json.Number 保留原文，40012 不会误判）。
+	return v.Code.String() == "4001" &&
+		strings.Contains(strings.ToLower(v.Message), "model config is empty")
+}
+
+// IsModelConfigMismatchCode 是 IsModelConfigMismatch 的流内版本
+// （SSE event:error 已解析出 code/msg，无 HTTP 状态）。
+func IsModelConfigMismatchCode(code int64, msg string) bool {
+	return code == 4001 &&
+		strings.Contains(strings.ToLower(msg), "model config is empty")
+}
+
 // Client SOLO 上游 HTTP 客户端。Host 字段可覆盖便于测试。
 type Client struct {
 	// HTTP 用于短 JSON 请求（ExchangeToken/模型/签到/积分），有总超时兜底。

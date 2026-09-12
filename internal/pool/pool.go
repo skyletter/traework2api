@@ -50,14 +50,16 @@ type Status struct {
 }
 
 type entry struct {
-	a          *auth.Auth
-	credits    int64
-	disabled   bool // session dead 硬禁用
-	enabled    bool // 用户软开关（默认 true），false 时 Pick 跳过
-	reason     string
-	until      time.Time
-	errCount   int
-	checkinGen int // 签到设备轮换代数（9074 限流时 +1，签到成功后清零）
+	a                 *auth.Auth
+	credits           int64
+	disabled          bool // session dead 硬禁用
+	enabled           bool // 用户软开关（默认 true），false 时 Pick 跳过
+	reason            string
+	until             time.Time
+	errCount          int
+	checkinGen        int       // 签到设备轮换代数（9074 限流时 +1，上游从不清零）
+	checkinRetryAfter time.Time // 9074 退避截止（wall-clock，重启不丢）
+	checkinRetryCount int       // 9074 累计次数（决定退避增长；成功/已签到清零）
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -72,12 +74,14 @@ func (e *entry) healthy(now time.Time) bool {
 
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
-	Credits    int64     `json:"credits"`
-	Disabled   bool      `json:"disabled"`
-	Enabled    *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
-	Reason     string    `json:"reason,omitempty"`
-	Until      time.Time `json:"until,omitempty"`
-	CheckinGen int       `json:"checkin_device_gen,omitempty"` // 旧文件缺省为 0（基线设备 ID）
+	Credits           int64     `json:"credits"`
+	Disabled          bool      `json:"disabled"`
+	Enabled           *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason            string    `json:"reason,omitempty"`
+	Until             time.Time `json:"until,omitempty"`
+	CheckinGen        int       `json:"checkin_device_gen,omitempty"` // 旧文件缺省为 0（基线设备 ID）
+	CheckinRetryAfter time.Time `json:"checkin_retry_after,omitempty"`
+	CheckinRetryCount int       `json:"checkin_retry_count,omitempty"`
 }
 
 // stateFile 持久化格式。
@@ -292,6 +296,76 @@ func (p *Pool) BumpCheckinGeneration(uid string) int {
 	return e.checkinGen
 }
 
+// 9074 退避参数：基线 60s，按次数指数增长并封顶。
+// Source: autumnsentiment/Trae2api-cn @ 2403954 + @ 165ac6e
+// （base 60s × 2^min(count,3)，上限 3600s；从不碰签到日期，只记退避）。
+const (
+	checkinRetryBase    = time.Minute
+	checkinRetryExpCap  = 3
+	checkinRetryMaxBack = time.Hour
+)
+
+// checkinBackoff 返回第 count 次 9074 后的等待时长（count 从 0 起）。
+func checkinBackoff(count int) time.Duration {
+	shift := count
+	if shift > checkinRetryExpCap {
+		shift = checkinRetryExpCap
+	}
+	d := checkinRetryBase << shift // 60→120→240→480s
+	if d > checkinRetryMaxBack {
+		d = checkinRetryMaxBack
+	}
+	return d
+}
+
+// NoteCheckinRateLimited 记录一次 9074，返回下次可重试时刻（wall-clock，持久化）。
+func (p *Pool) NoteCheckinRateLimited(uid string) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}
+	}
+	after := time.Now().Add(checkinBackoff(e.checkinRetryCount))
+	e.checkinRetryCount++
+	e.checkinRetryAfter = after
+	p.saveLocked()
+	return after
+}
+
+// CheckinRetryDue 报告账号是否有到期的签到重试（从未记录退避时为 false，
+// 首轮尝试归每日定时任务，避免后台循环与定时任务重复领取）。
+func (p *Pool) CheckinRetryDue(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok || e.checkinRetryCount == 0 {
+		return false
+	}
+	return !time.Now().Before(e.checkinRetryAfter)
+}
+
+// ClearCheckinRetry 清除 9074 退避（签到成功或已签到时调用；不碰代数）。
+func (p *Pool) ClearCheckinRetry(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && (e.checkinRetryCount != 0 || !e.checkinRetryAfter.IsZero()) {
+		e.checkinRetryCount = 0
+		e.checkinRetryAfter = time.Time{}
+		p.saveLocked()
+	}
+}
+
+// SetCheckinRetryAfterForTest 直接设置退避截止（仅供测试时间旅行；生产请用 NoteCheckinRateLimited）。
+func (p *Pool) SetCheckinRetryAfterForTest(uid string, t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.checkinRetryAfter = t
+		p.saveLocked()
+	}
+}
+
 // Status 查询单账号状态。
 func (p *Pool) Status(uid string) (Status, bool) {
 	p.mu.RLock()
@@ -367,13 +441,15 @@ func (p *Pool) load() {
 			gen = 0
 		}
 		p.byUID[uid] = &entry{
-			a:          &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:    s.Credits,
-			disabled:   s.Disabled,
-			enabled:    enabled,
-			reason:     s.Reason,
-			until:      s.Until,
-			checkinGen: gen,
+			a:                 &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:           s.Credits,
+			disabled:          s.Disabled,
+			enabled:           enabled,
+			reason:            s.Reason,
+			until:             s.Until,
+			checkinGen:        gen,
+			checkinRetryAfter: s.CheckinRetryAfter,
+			checkinRetryCount: s.CheckinRetryCount,
 		}
 	}
 }
@@ -385,11 +461,13 @@ func (p *Pool) saveLocked() {
 	sf := stateFile{Accounts: map[string]stateEntry{}}
 	for uid, e := range p.byUID {
 		se := stateEntry{
-			Credits:    e.credits,
-			Disabled:   e.disabled,
-			Reason:     e.reason,
-			Until:      e.until,
-			CheckinGen: e.checkinGen,
+			Credits:           e.credits,
+			Disabled:          e.disabled,
+			Reason:            e.reason,
+			Until:             e.until,
+			CheckinGen:        e.checkinGen,
+			CheckinRetryAfter: e.checkinRetryAfter,
+			CheckinRetryCount: e.checkinRetryCount,
 		}
 		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
 		if !e.enabled {

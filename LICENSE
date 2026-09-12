@@ -2,6 +2,14 @@ MIT License
 
 Copyright (c) 2026 connectedGraph
 
+Derivation note (not a license change): this project derives from
+https://github.com/Sliverkiss/traework2api, which carried no license
+file as of 2026-09-12. Checkin 9074-device-rotation behavior was
+reimplemented (in Go) from observations of
+https://github.com/autumnsentiment/Trae2api-cn (MIT); see
+docs/PORTING.md for per-behavior sources. If upstream adds a license
+notice, it must be retained here.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
