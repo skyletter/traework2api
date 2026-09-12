@@ -71,6 +71,8 @@
   .login-status { font-size:12px; color:var(--dim); margin-top:8px; word-break:break-all; }
   .login-status.err { color:var(--bad); }
   .login-status.ok { color:var(--ok); }
+  .login-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .login-tip { font-size:11px; color:var(--dim); margin-top:8px; }
   textarea.imp { width:100%; min-height:90px; background:var(--card); border:1px solid #2a2f3a;
                  border-radius:8px; color:var(--fg); padding:10px 12px; font-size:12px;
                  font-family:Consolas,monospace; resize:vertical; }
@@ -115,7 +117,11 @@
   <div id="pane-accounts" class="pane active">
     <div class="login-bar">
       <h2>添加账号（TRAE 登录）</h2>
-      <button class="btn primary" id="loginBtn" onclick="startLogin()">添加账号（TRAE 登录）</button>
+      <div class="login-actions">
+        <button class="btn primary" id="loginBtn" onclick="startLogin()">一键授权登录</button>
+        <button class="btn sm" id="copyLoginBtn" onclick="copyLoginUrl()" disabled>复制授权链接</button>
+      </div>
+      <div class="login-tip">需保持当前设备的 127.0.0.1:18080 SSH 转发运行；授权链接仅在当前页面内存中保留。</div>
       <div id="loginStatus" class="login-status" style="display:none"></div>
     </div>
 
@@ -149,6 +155,8 @@
 <script>
 let activeTab = 'accounts';
 let loginPollTimer = null;
+let currentLoginUrl = '';
+let loginWindow = null;
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function badge(text, cls){ return '<span class="badge '+cls+'">'+esc(text)+'</span>'; }
@@ -293,14 +301,52 @@ async function startLogin(){
   const st = document.getElementById('loginStatus');
   st.style.display=''; st.className='login-status'; st.textContent='生成登录链接...';
   const btn = document.getElementById('loginBtn'); btn.disabled = true;
+  const copyBtn = document.getElementById('copyLoginBtn'); copyBtn.disabled = true;
+  currentLoginUrl = '';
+  // Open during the click gesture so browsers do not block the later async navigation.
+  loginWindow = window.open('about:blank', '_blank');
   try{
     const r = await fetch('/admin/api/login', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body:'{}'});
     const d = await r.json();
-    if(!r.ok){ st.className='login-status err'; st.textContent='生成失败：'+apiErr(d); btn.disabled=false; return; }
+    if(!r.ok){
+      if(loginWindow && !loginWindow.closed) loginWindow.close();
+      loginWindow = null;
+      st.className='login-status err'; st.textContent='生成失败：'+apiErr(d); btn.disabled=false; return;
+    }
+    currentLoginUrl = d.login_url || '';
+    copyBtn.disabled = !currentLoginUrl;
     st.textContent = '已打开登录窗口，请在浏览器完成手机号登录。完成后此页自动刷新。';
-    window.open(d.login_url, '_blank');
+    if(loginWindow && !loginWindow.closed){
+      loginWindow.location.href = d.login_url;
+    } else {
+      window.open(d.login_url, '_blank');
+      st.textContent = '授权链接已生成，请允许弹窗或点击「复制授权链接」后打开。';
+    }
     pollLogin(d.pending_id);
-  }catch(e){ st.className='login-status err'; st.textContent='生成失败：'+e.message; btn.disabled=false; }
+  }catch(e){
+    if(loginWindow && !loginWindow.closed) loginWindow.close();
+    loginWindow = null;
+    st.className='login-status err'; st.textContent='生成失败：'+e.message; btn.disabled=false;
+  }
+}
+async function copyLoginUrl(){
+  const st = document.getElementById('loginStatus');
+  if(!currentLoginUrl){ st.style.display=''; st.className='login-status err'; st.textContent='当前没有可复制的授权链接，请先点击「一键授权登录」'; return; }
+  try{
+    await navigator.clipboard.writeText(currentLoginUrl);
+    st.style.display=''; st.className='login-status ok'; st.textContent='授权链接已复制，可粘贴到当前设备浏览器打开。';
+  }catch(e){
+    const ta = document.createElement('textarea');
+    ta.value = currentLoginUrl; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    try{
+      const copied = document.execCommand('copy');
+      st.style.display=''; st.className = copied ? 'login-status ok' : 'login-status err';
+      st.textContent = copied ? '授权链接已复制，可粘贴到当前设备浏览器打开。' : '复制失败，请允许剪贴板权限后重试。';
+    }catch(err){
+      st.style.display=''; st.className='login-status err'; st.textContent='复制失败，请允许剪贴板权限后重试。';
+    }finally{ document.body.removeChild(ta); }
+  }
 }
 function pollLogin(pid){
   if(loginPollTimer) clearInterval(loginPollTimer);

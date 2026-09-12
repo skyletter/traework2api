@@ -131,6 +131,11 @@ func ParseCallback(rawURL string) (*CallbackInfo, error) {
 	info := &CallbackInfo{
 		RefreshToken: q.Get("refreshToken"),
 	}
+	// The current SOLO web flow sends the same refresh token as `data`.
+	// Keep the explicit refreshToken field preferred for older callbacks.
+	if info.RefreshToken == "" {
+		info.RefreshToken = q.Get("data")
+	}
 
 	userInfo := parseJSONParam(q.Get("userInfo"))
 	info.UID = getString(userInfo, "UserID")

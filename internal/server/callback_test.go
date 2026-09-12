@@ -65,6 +65,23 @@ func TestParseCallbackFallbackToUserJwt(t *testing.T) {
 	}
 }
 
+func TestParseCallbackDataRefreshToken(t *testing.T) {
+	// The current TRAE SOLO web flow may return the refresh token as data.
+	v := url.Values{}
+	v.Set("data", "rt-from-data")
+	v.Set("loginTraceID", "trace-1")
+	v.Set("userInfo", `{"UserID":"u-data","ScreenName":"Data User"}`)
+	cb := "http://127.0.0.1:18080/authorize?" + v.Encode()
+
+	info, err := ParseCallback(cb)
+	if err != nil {
+		t.Fatalf("parse data callback: %v", err)
+	}
+	if info.RefreshToken != "rt-from-data" {
+		t.Errorf("refreshToken from data=%q want rt-from-data", info.RefreshToken)
+	}
+}
+
 func TestParseCallbackNoRefreshButHasJwtToken(t *testing.T) {
 	// 既无 query.refreshToken，userJwt 也无 RefreshToken，但有 Token → 用 Token 当 accessToken
 	userJwt := `{"Token":"at-direct","TokenExpireAt":1786847930141}`
