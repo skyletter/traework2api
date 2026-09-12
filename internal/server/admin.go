@@ -1,4 +1,4 @@
-﻿// 管理面板（/admin）：只读查询，无鉴权（本地面板）；CLI 操作留待开发。
+// 管理面板（/admin）：只读查询，无鉴权（本地面板）；CLI 操作留待开发。
 package server
 
 import (

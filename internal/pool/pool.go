@@ -1,4 +1,4 @@
-﻿// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
+// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
 // 挑选策略：healthy 账号中剩余积分最多者（SPEC §4.7）。
 package pool
 
@@ -46,7 +46,7 @@ type Status struct {
 	// 对外暴露：Disabled 与 Enabled 都为 false 才算可被 Pick（healthy）。
 	Disabled bool `json:"disabled"`
 	Enabled  bool `json:"enabled"`
-	ErrCount int   `json:"err_count,omitempty"`
+	ErrCount int  `json:"err_count,omitempty"`
 }
 
 type entry struct {
@@ -72,7 +72,7 @@ func (e *entry) healthy(now time.Time) bool {
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
 	Credits  int64     `json:"credits"`
-	Disabled bool     `json:"disabled"`
+	Disabled bool      `json:"disabled"`
 	Enabled  *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
 	Reason   string    `json:"reason,omitempty"`
 	Until    time.Time `json:"until,omitempty"`

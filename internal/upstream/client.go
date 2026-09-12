@@ -1,4 +1,4 @@
-﻿// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
+// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
 // checkin_credits / ide_user_ent_usage + 错误分类。
 package upstream
 
