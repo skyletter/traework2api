@@ -18,7 +18,7 @@
 | Sliverkiss/traework2api（本项目基座） | `ea18d5c7` 起始…`207d0807` | 2026-08-02 | 停更；且**无 LICENSE 文件**（LICENSE 中的 derivation note 在上游补 license 后必须同步） |
 | autumnsentiment/Trae2api-cn | `c698b19` | 2026-09-01 | 活跃；签到 9074 机制来源 |
 | muskke/trae-api-proxy | v0.5.1 | 2026-09-05 | 活跃；Responses/Codex 路线与本服务无关 |
-| smart-open/TraeWorkAssistant | v3.3.4 | 2026-09-10 | 活跃但仅 Windows 桌面端；只取协议结论 |
+| smart-open/TraeWorkAssistant | v3.3.5 | 2026-09-11 | 活跃但仅 Windows 桌面端；只取协议结论（v3.3.5 为纯版本号升级，无新增实质内容） |
 | JeffHu0912/trae2api | `ec20c08` | 2026-09-08 | 刚起步（4 提交），无可移植内容 |
 
 ## 行为对照表

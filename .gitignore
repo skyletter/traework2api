@@ -22,6 +22,7 @@ trae2api-web-*
 docs/*
 !docs/RESEARCH.md
 !docs/PORTING.md
+!docs/VENDOR.md
 !docs/logo.svg
 
 # 构建产物
