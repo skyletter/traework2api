@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # 触发 build workflow 需要 actions:write
 
 jobs:
   sync:
