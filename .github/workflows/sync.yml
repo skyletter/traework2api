@@ -41,8 +41,10 @@ jobs:
           echo "PUSHED=1" >> "$GITHUB_ENV"
 
       # GITHUB_TOKEN 的 push 不会触发其他 workflow，这里显式触发构建
+      # 注意：runner 上 gh 会从 git remote 推断仓库，可能误判为 upstream，必须用 -R 显式指定
       - name: Trigger build
         if: env.PUSHED == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run build.yml --ref main
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run build.yml --ref main -R "${{ github.repository }}"

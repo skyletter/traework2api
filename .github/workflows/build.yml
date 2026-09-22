@@ -64,10 +64,12 @@ jobs:
       - name: Publish rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release delete latest --yes --cleanup-tag -R "${{ github.repository }}" 2>/dev/null || true
           gh release create latest \
+            -R "${{ github.repository }}" \
             traework2api-linux-amd64.tar.gz \
             traework2api-linux-arm64.tar.gz \
             --title "traework2api ${SHORT_SHA}" \
