@@ -43,7 +43,7 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min   # mode=min 大幅减小 Actions 缓存占用（免费配额仅 500MB）
 
       - name: Export per-arch image tars
         run: |
@@ -58,7 +58,7 @@ jobs:
         with:
           name: docker-images
           path: traework2api-*.tar.gz
-          retention-days: 30
+          retention-days: 7   # 缩短产物保留期，防止 Actions 存储超配额
           if-no-files-found: error
 
       - name: Publish rolling release
