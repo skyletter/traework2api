@@ -156,22 +156,8 @@ func TestChatStreamCooldownOnStreamError(t *testing.T) {
 		t.Errorf("body=%q want error event + [DONE]", body)
 	}
 	st, _ := p.Status("u1")
-	// 新行为：模型级错误只冷却 (uid, model)，不连坐账号全局状态。
-	if st.ErrCount != 0 {
-		t.Errorf("model-level error should NOT bump account errCount: %+v", st)
-	}
-	if st.Cooling {
-		t.Errorf("model-level error should NOT cool the whole account: %+v", st)
-	}
-	// 该模型被隔离：PickFor 拿不到，Pick 仍可用，其他模型不受影响。
-	if acct := p.PickFor("glm-5.2", nil); acct != nil {
-		t.Errorf("PickFor should exclude model-cooled account, got %s", acct.UID)
-	}
-	if acct := p.Pick(); acct == nil || acct.UID != "u1" {
-		t.Errorf("Pick should still return the account, got %+v", acct)
-	}
-	if acct := p.PickFor("DeepSeek-V4-Pro", nil); acct == nil || acct.UID != "u1" {
-		t.Errorf("PickFor other model should work, got %+v", acct)
+	if st.ErrCount == 0 {
+		t.Errorf("stream error should bump errCount: %+v", st)
 	}
 }
 

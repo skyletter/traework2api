@@ -2,8 +2,9 @@ name: Check Upstream / Community Updates
 
 # 【重要变更 2026-09-26】
 # 原上游 Sliverkiss/traework2api 已删库（仓库 404）。
-# 本仓库现以 240xu/trae2api-more 为基线（已 merge，含 Web 管理面板、签到 self-healing），
-# 并保留模型级冷却修复（1005 不再连坐账号池、池级快速失败）。
+# 本仓库现以 240xu/trae2api-more 为基线（纯原版代码，含 Web 管理面板、签到 self-healing）。
+# 注：此前叠加的模型级冷却修复（tag: fix-v1）已暂缓，先观察原版效果，
+#     如需恢复：git cherry-pick / git revert 对应提交即可。
 # 240xu 不提供 Docker 镜像，镜像由本仓库 Actions 构建（GHCR + Release）。
 #
 # 其他同源社区分支（供参考）：

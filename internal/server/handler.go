@@ -23,9 +23,8 @@ type Config struct {
 	APIKey       string        // 空 = 不鉴权
 	AuthDir      string        // auths/ 目录，用于 import/delete 落盘 trae-*.json
 	MaxRotate    int           // 单请求最多换号次数，默认 3
-	PlanCooldown time.Duration // 1005 冷却（模型级），默认 30m
+	PlanCooldown time.Duration // 1005 冷却，默认 12h
 	SoftCooldown time.Duration // 429 冷却，默认 60s
-	ModelSoftCooldown time.Duration // 模型级短冷却（空 msg 1005 / 模型错误），默认 5m
 	ErrThreshold int           // 连续错误阈值，默认 3
 	ErrCooldown  time.Duration // 错误冷却，默认 10m
 	RefreshSkew  time.Duration // token 预刷新窗口，默认 24h
@@ -52,10 +51,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxRotate = 3
 	}
 	if cfg.PlanCooldown <= 0 {
-		cfg.PlanCooldown = 30 * time.Minute
-	}
-	if cfg.ModelSoftCooldown <= 0 {
-		cfg.ModelSoftCooldown = 5 * time.Minute
+		cfg.PlanCooldown = 12 * time.Hour
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 60 * time.Second
@@ -365,17 +361,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	body = setModelInBody(body, configName)
 
-	// 池级模型不可用（所有账号对该模型均失败过）→ 直接快速失败，不再打上游。
-	if h.cfg.Pool.ModelUnavailable(configName) {
-		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-			fmt.Sprintf("model %q not available for current plan, retry later", peek.Model))
-		return
-	}
-
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.cfg.Pool.PickFor(configName, tried)
+		acct := h.cfg.Pool.PickExcluding(tried)
 		if acct == nil {
 			break
 		}
@@ -412,8 +401,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			kind := upstream.Classify(status, string(respBody))
 			switch kind {
 			case upstream.ErrPlanLimit:
-				// 模型级冷却：只影响该模型，不连坐账号其他模型。
-				h.cfg.Pool.ModelCool(acct.UID, configName, h.cfg.PlanCooldown, "plan 权益不足")
+				h.cfg.Pool.Cooldown(acct.UID, pool.CoolPlan, h.cfg.PlanCooldown, "plan 权益不足")
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 				continue
 			case upstream.ErrSoftRate:
@@ -439,7 +427,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
 			_ = upstream.StreamWithError(w, rc, func(se *upstream.SOLOStreamError) {
-				h.handleStreamError(acct.UID, configName, se)
+				h.handleStreamError(acct.UID, se)
 			})
 			rc.Close()
 			return
@@ -453,9 +441,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				switch se.Kind() {
 				case upstream.ErrPlanLimit:
-					h.cfg.Pool.ModelCool(acct.UID, configName, h.cfg.PlanCooldown, "plan 权益不足")
+					h.cfg.Pool.Cooldown(acct.UID, pool.CoolPlan, h.cfg.PlanCooldown, "plan 权益不足")
 				default:
-					h.cfg.Pool.ModelCool(acct.UID, configName, h.cfg.ModelSoftCooldown, "model error "+se.Error())
+					h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 				}
 				continue
 			}
@@ -466,9 +454,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	// 所有账号对该模型均失败 → 池级快速失败，避免反复打上游。
-	h.cfg.Pool.MarkModelUnavailable(configName, 0)
-
 	msg := "all accounts unavailable (cooling/disabled)"
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
@@ -477,23 +462,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStreamError 流式响应中的上游业务错误 → pool 冷却状态机。
-// 1005 plan 权益不足 → 模型级冷却；模型 function 不匹配 → 不处理；
-// 其余（5xx/参数错误等）→ 模型级短冷却。
-func (h *Handler) handleStreamError(uid, model string, se *upstream.SOLOStreamError) {
+// 1005 plan 权益不足 → 长冷却；模型 function 不匹配 → 不处理；
+// 其余（5xx/参数错误等）→ 累计错误冷却。
+func (h *Handler) handleStreamError(uid string, se *upstream.SOLOStreamError) {
 	if upstream.IsModelConfigMismatchCode(se.Code, se.Msg) {
 		return
 	}
 	switch se.Kind() {
 	case upstream.ErrPlanLimit:
-		// 1005：区分空 msg（多为并发超限 solo_agent_parallel_limit）与明确 plan 语义
-		d := h.cfg.PlanCooldown
-		if se.Msg == "" {
-			d = h.cfg.ModelSoftCooldown
-		}
-		h.cfg.Pool.ModelCool(uid, model, d, "plan 权益不足")
+		h.cfg.Pool.Cooldown(uid, pool.CoolPlan, h.cfg.PlanCooldown, "plan 权益不足")
 	default:
-		// 模型级错误（3003/4023 等，多为该模型不可用）→ 模型级短冷却，不连坐账号
-		h.cfg.Pool.ModelCool(uid, model, h.cfg.ModelSoftCooldown, "model error "+se.Error())
+		h.cfg.Pool.NoteError(uid, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 	}
 }
 

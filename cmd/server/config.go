@@ -21,8 +21,7 @@ type Config struct {
 	DefaultModel  string `json:"default_model"`  // "glm-5.2"
 
 	Cooldown struct {
-		PlanCredit  string `json:"plan_credit"`   // "30m"（1005 模型级冷却）
-		ModelSoft   string `json:"model_soft"`    // "5m"（空 msg 1005 / 模型错误短冷却）
+		PlanCredit  string `json:"plan_credit"`   // "12h"
 		SoftRate    string `json:"soft_rate"`     // "60s"
 		ErrThresh   int    `json:"err_threshold"` // 3
 		ErrCooldown string `json:"err_cooldown"`  // "10m"
@@ -39,7 +38,6 @@ type Config struct {
 
 	// 解析后的 duration。
 	PlanCreditDur  time.Duration `json:"-"`
-	ModelSoftDur   time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
 	ErrCooldownDur time.Duration `json:"-"`
 }
@@ -54,8 +52,7 @@ func Default() *Config {
 		StateFile:    "./data/state.json",
 		DefaultModel: "glm-5.2",
 	}
-	c.Cooldown.PlanCredit = "30m"
-	c.Cooldown.ModelSoft = "5m"
+	c.Cooldown.PlanCredit = "12h"
 	c.Cooldown.SoftRate = "60s"
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
@@ -110,9 +107,6 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("TW2A_PLAN_CREDIT"); v != "" {
 		c.Cooldown.PlanCredit = v
 	}
-	if v := os.Getenv("TW2A_MODEL_SOFT"); v != "" {
-		c.Cooldown.ModelSoft = v
-	}
 	if v := os.Getenv("TW2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
@@ -140,9 +134,6 @@ func (c *Config) normalize() error {
 	var err error
 	if c.PlanCreditDur, err = time.ParseDuration(c.Cooldown.PlanCredit); err != nil {
 		return fmt.Errorf("cooldown.plan_credit: %w", err)
-	}
-	if c.ModelSoftDur, err = time.ParseDuration(c.Cooldown.ModelSoft); err != nil {
-		return fmt.Errorf("cooldown.model_soft: %w", err)
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)

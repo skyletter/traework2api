@@ -17,12 +17,8 @@ func TestDefault(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	// 模型级冷却修复：plan_credit 默认 12h -> 30m；新增 model_soft 默认 5m。
-	if c.PlanCreditDur.Minutes() != 30 {
+	if c.PlanCreditDur.Hours() != 12 {
 		t.Errorf("plan_credit=%v", c.PlanCreditDur)
-	}
-	if c.ModelSoftDur.Minutes() != 5 {
-		t.Errorf("model_soft=%v", c.ModelSoftDur)
 	}
 	if c.SoftRateDur.Seconds() != 60 {
 		t.Errorf("soft_rate=%v", c.SoftRateDur)

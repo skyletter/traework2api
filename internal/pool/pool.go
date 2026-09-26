@@ -60,7 +60,6 @@ type entry struct {
 	checkinGen        int       // 签到设备轮换代数（9074 限流时 +1，上游从不清零）
 	checkinRetryAfter time.Time // 9074 退避截止（wall-clock，重启不丢）
 	checkinRetryCount int       // 9074 累计次数（决定退避增长；成功/已签到清零）
-	modelUntil        map[string]time.Time // per-model 冷却（内存态，不落盘；重启后自动复探）
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -92,36 +91,9 @@ type stateFile struct {
 
 // Pool 账号池。
 type Pool struct {
-	mu           sync.RWMutex
-	byUID        map[string]*entry
-	stateFp      string
-	modelUnavail map[string]time.Time // 池级模型不可用（所有账号对该模型均失败），内存态
-}
-
-// modelUnavailDefault 池级模型快速失败的默认时长。
-const modelUnavailDefault = 15 * time.Minute
-
-// ModelUnavailable 查询池级模型是否处于快速失败冷却。
-func (p *Pool) ModelUnavailable(model string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if t, ok := p.modelUnavail[model]; ok && time.Now().Before(t) {
-		return true
-	}
-	return false
-}
-
-// MarkModelUnavailable 标记池级模型快速失败（所有账号对该模型均失败时调用）。
-func (p *Pool) MarkModelUnavailable(model string, d time.Duration) {
-	if d <= 0 {
-		d = modelUnavailDefault
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.modelUnavail == nil {
-		p.modelUnavail = map[string]time.Time{}
-	}
-	p.modelUnavail[model] = time.Now().Add(d)
+	mu      sync.RWMutex
+	byUID   map[string]*entry
+	stateFp string
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态。
@@ -228,33 +200,6 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return best.a
 }
 
-// PickFor 挑选 healthy 且对指定模型未冷却的账号（积分最高优先）。
-// per-model 冷却的账号跳过，但账号全局状态不受影响。
-func (p *Pool) PickFor(model string, tried map[string]bool) *auth.Auth {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	now := time.Now()
-	var best *entry
-	for uid, e := range p.byUID {
-		if tried != nil && tried[uid] {
-			continue
-		}
-		if !e.healthy(now) {
-			continue
-		}
-		if t, ok := e.modelUntil[model]; ok && now.Before(t) {
-			continue // 该账号对此模型冷却中，跳过
-		}
-		if best == nil || e.credits > best.credits {
-			best = e
-		}
-	}
-	if best == nil {
-		return nil
-	}
-	return best.a
-}
-
 // SetCredits 更新账号积分。
 func (p *Pool) SetCredits(uid string, credits int64) {
 	p.mu.Lock()
@@ -263,19 +208,6 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 		e.credits = credits
 	}
 	p.saveLocked()
-}
-
-// ModelCool 冷却 (uid, model) 组合至 now+d；不影响账号其他模型。
-func (p *Pool) ModelCool(uid, model string, d time.Duration, reason string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
-		if e.modelUntil == nil {
-			e.modelUntil = map[string]time.Time{}
-		}
-		e.modelUntil[model] = time.Now().Add(d)
-	}
-	// 不落盘：模型冷却为内存态，重启后自动复探。
 }
 
 // Cooldown 冷却账号至 now+d。
