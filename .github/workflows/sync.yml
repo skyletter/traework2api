@@ -1,51 +1,52 @@
-name: Sync Upstream
+name: Check Upstream / Community Updates
+
+# 【重要变更 2026-09-23】
+# 原上游 Sliverkiss/traework2api 已删库（仓库 404），自动同步已停用。
+# 本仓库现为独立维护分支：traework2api 最终版代码 + 模型级冷却修复（1005 不再连坐账号池）。
+#
+# 同源代码的社区延续分支（供参考/移植，未自动合并）：
+#   - 240xu/trae2api-more        checkin self-healing、一键 Web 登录（更新至 2026-09-12）
+#   - connectedGraph/trae2api-web Web 管理面板（更新至 2026-08-25）
+#   - JeffHu0912/trae2api        多账号管理面板，独立实现（更新至 2026-09-08）
+#
+# 手动运行本 workflow 可检查指定仓库与我们的提交差异（仅报告到 Summary，不自动合并）。
 
 on:
-  schedule:
-    - cron: "30 18 * * *" # 每天 UTC 18:30（北京时间 02:30）
   workflow_dispatch:
+    inputs:
+      upstream:
+        description: "要检查的仓库（owner/repo）"
+        required: false
+        default: "240xu/trae2api-more"
 
 permissions:
-  contents: write
-  actions: write   # 触发 build workflow 需要 actions:write
+  contents: read
 
 jobs:
-  sync:
+  check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
 
-      - name: Sync from upstream
+      - name: Report diff vs upstream
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/Sliverkiss/traework2api.git
-          git fetch upstream main
-          LOCAL=$(git rev-parse HEAD)
-          UPSTREAM=$(git rev-parse upstream/main)
-          if [ "$LOCAL" = "$UPSTREAM" ]; then
-            echo "Already up to date: $LOCAL"
-            exit 0
-          fi
-          echo "Upstream advanced: $LOCAL -> $UPSTREAM"
-          # merge 保留本仓库的 workflow 文件（上游无 .github/workflows，不会冲突）
-          git merge upstream/main --no-edit || {
-            echo "::error::合并冲突，请手动处理"
-            git merge --abort || true
-            exit 1
-          }
-          git push origin main
-          echo "PUSHED=1" >> "$GITHUB_ENV"
+          REPO="${{ github.event.inputs.upstream }}"
+          echo "检查目标: $REPO"
+          git remote add upstream "https://github.com/${REPO}.git"
+          if git fetch upstream main; then BRANCH=main; else git fetch upstream master && BRANCH=master; fi
 
-      # GITHUB_TOKEN 的 push 不会触发其他 workflow，这里显式触发构建
-      # 注意：runner 上 gh 会从 git remote 推断仓库，可能误判为 upstream，必须用 -R 显式指定
-      - name: Trigger build
-        if: env.PUSHED == '1'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run build.yml --ref main -R "${{ github.repository }}"
+          echo "## 与 $REPO 的差异报告" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### 对方独有提交（近 30 条）" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          git log --oneline HEAD..upstream/$BRANCH | head -30 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### 我们独有提交（含模型级冷却修复）" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          git log --oneline upstream/$BRANCH..HEAD | head -30 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
