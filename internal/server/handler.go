@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"traework2api/internal/pool"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 // Config handler 依赖。
@@ -21,6 +21,7 @@ type Config struct {
 	Pool         *pool.Pool
 	Upstream     *upstream.Client
 	APIKey       string        // 空 = 不鉴权
+	AuthDir      string        // auths/ 目录，用于 import/delete 落盘 trae-*.json
 	MaxRotate    int           // 单请求最多换号次数，默认 3
 	PlanCooldown time.Duration // 1005 冷却（模型级），默认 30m
 	SoftCooldown time.Duration // 429 冷却，默认 60s
@@ -38,6 +39,11 @@ const maxBodyBytes = 8 << 20
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+
+	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
+	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
+	loginMu sync.Mutex
+	logins  map[string]*pendingLogin
 }
 
 // NewHandler 构建 handler。
@@ -66,12 +72,55 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = upstream.DefaultConfigName
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), logins: map[string]*pendingLogin{}}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 管理面板：本地面板
+	// 读接口无鉴权（局域网内只读）；写接口（accounts 写/login/refresh/authorize）
+	// 经 withAdminAuth 校验 Bearer = TW2A_API_KEY（见 §4 安全设计）。
+	h.mux.HandleFunc("GET /admin", h.adminPage)
+	h.mux.HandleFunc("GET /admin/api/credits", h.adminCredits)
+	// 账号 CRUD
+	h.mux.HandleFunc("GET /admin/api/accounts", h.adminAccounts)
+	h.mux.HandleFunc("POST /admin/api/accounts/import", h.withAdminAuth(h.adminImportAccount))
+	h.mux.HandleFunc("DELETE /admin/api/accounts/{uid}", h.withAdminAuth(h.adminDeleteAccount))
+	h.mux.HandleFunc("PATCH /admin/api/accounts/{uid}", h.withAdminAuth(h.adminPatchAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/refresh", h.withAdminAuth(h.adminRefreshAccount))
+	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/json", h.adminAccountJSON)
+	// Web 登录闭环
+	h.mux.HandleFunc("POST /admin/api/login", h.withAdminAuth(h.adminLoginStart))
+	h.mux.HandleFunc("GET /admin/api/login/result", h.adminLoginResult)
+	h.mux.HandleFunc("POST /admin/api/login/cancel", h.withAdminAuth(h.adminLoginCancel))
+	// TRAE 回调落点（/authorize）：无需 Bearer（TRAE 浏览器 302 不带 key），
+	// 仅捕获 query 写 pending 队列，不直接落盘 token。
+	h.mux.HandleFunc("GET /authorize", h.authorizeCallback)
 	return h
+}
+
+// withAdminAuth 校验写操作的 Bearer API Key（常量时间比较，复用 withAuth 逻辑）。
+// APIKey 为空时（未配置 TW2A_API_KEY）退化为不鉴权——本地无 key 场景仍可用，
+// 但生产强烈建议配 key（见 PLAN §4）。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.cfg.APIKey == "" {
+			next(w, r)
+			return
+		}
+		authz := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(authz) < len(prefix) || !strings.EqualFold(authz[:len(prefix)], prefix) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		key := authz[len(prefix):]
+		if subtle.ConstantTimeCompare([]byte(key), []byte(h.cfg.APIKey)) != 1 {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -162,17 +211,19 @@ func (h *Handler) knownModel(model string) bool {
 	return false
 }
 
-// 静态 SOLO 模型表（SPEC P3：32 个 config_name，来自逆向报告；动态拉取失败时回退）。
+// 静态 SOLO 模型表（33 个 config_name；动态拉取失败时回退，平时不可见）。
+// 退役 ID 已剔除、新增 ID 来自 2026-09-12 社区取证，见 docs/PORTING.md。
 var staticModels = []map[string]any{
 	{"id": "Doubao-Seed-2.1-Pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "seed-code-pro-0430", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "Doubao-Seed-2.1-Turbo", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
-	{"id": "Doubao-Seed-2.0-Code", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "Doubao-Seed-Code", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "Doubao-Seed-Evolving", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "DeepSeek-V4-Flash-Official", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "DeepSeek-V4-Pro-Official", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "browser_use_subagent", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "glm-5.3", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
-	{"id": "glm-5-turbo", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
-	{"id": "glm-5", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "DeepSeek-V4-Pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "DeepSeek-V4-Flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "kimi-k3", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
@@ -180,8 +231,8 @@ var staticModels = []map[string]any{
 	{"id": "kimi-k2.6", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "qwen-3.7-plus", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
-	{"id": "sagitta", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
-	{"id": "aquila", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen3.8-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen3.8-max", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "custom_model_gemini", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "custom_model_placeholder", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "custom_model_1M_text", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
@@ -353,6 +404,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if status >= 400 {
+			if upstream.IsModelConfigMismatch(status, string(respBody)) {
+				// 模型与 function 不匹配是模型问题：不冷却、不计数，换下一账号。
+				lastErr = &upstream.Error{Kind: upstream.ErrClient, Status: status, Msg: string(respBody)}
+				continue
+			}
 			kind := upstream.Classify(status, string(respBody))
 			switch kind {
 			case upstream.ErrPlanLimit:
@@ -421,8 +477,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStreamError 流式响应中的上游业务错误 → pool 冷却状态机。
-// 1005 plan 权益不足 → 长冷却；其余（5xx/参数错误等）→ 累计错误冷却。
+// 1005 plan 权益不足 → 模型级冷却；模型 function 不匹配 → 不处理；
+// 其余（5xx/参数错误等）→ 模型级短冷却。
 func (h *Handler) handleStreamError(uid, model string, se *upstream.SOLOStreamError) {
+	if upstream.IsModelConfigMismatchCode(se.Code, se.Msg) {
+		return
+	}
 	switch se.Kind() {
 	case upstream.ErrPlanLimit:
 		// 1005：区分空 msg（多为并发超限 solo_agent_parallel_limit）与明确 plan 语义

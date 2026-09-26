@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"traework2api/internal/auth"
+	"trae2api-web/internal/auth"
 )
 
 // CoolKind 冷却类型。
@@ -42,22 +42,29 @@ type Status struct {
 	Cooling  bool      `json:"cooling"`
 	Until    time.Time `json:"until,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
-	Disabled bool      `json:"disabled"`
-	ErrCount int       `json:"err_count,omitempty"`
+	// Disabled = session 失效硬禁用（需重登或换文件恢复）；Enabled = 软开关（用户可逆启停）。
+	// 对外暴露：Disabled 与 Enabled 都为 false 才算可被 Pick（healthy）。
+	Disabled bool `json:"disabled"`
+	Enabled  bool `json:"enabled"`
+	ErrCount int  `json:"err_count,omitempty"`
 }
 
 type entry struct {
-	a          *auth.Auth
-	credits    int64
-	disabled   bool
-	reason     string
-	until      time.Time
-	errCount   int
-	modelUntil map[string]time.Time // per-model 冷却（内存态，不落盘；重启后自动复探）
+	a                 *auth.Auth
+	credits           int64
+	disabled          bool // session dead 硬禁用
+	enabled           bool // 用户软开关（默认 true），false 时 Pick 跳过
+	reason            string
+	until             time.Time
+	errCount          int
+	checkinGen        int       // 签到设备轮换代数（9074 限流时 +1，上游从不清零）
+	checkinRetryAfter time.Time // 9074 退避截止（wall-clock，重启不丢）
+	checkinRetryCount int       // 9074 累计次数（决定退避增长；成功/已签到清零）
+	modelUntil        map[string]time.Time // per-model 冷却（内存态，不落盘；重启后自动复探）
 }
 
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled {
+	if e.disabled || !e.enabled {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -66,14 +73,21 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// stateEntry state.json 单账号持久化条目。
+type stateEntry struct {
+	Credits           int64     `json:"credits"`
+	Disabled          bool      `json:"disabled"`
+	Enabled           *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason            string    `json:"reason,omitempty"`
+	Until             time.Time `json:"until,omitempty"`
+	CheckinGen        int       `json:"checkin_device_gen,omitempty"` // 旧文件缺省为 0（基线设备 ID）
+	CheckinRetryAfter time.Time `json:"checkin_retry_after,omitempty"`
+	CheckinRetryCount int       `json:"checkin_retry_count,omitempty"`
+}
+
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	} `json:"accounts"`
+	Accounts map[string]stateEntry `json:"accounts"`
 }
 
 // Pool 账号池。
@@ -124,10 +138,10 @@ func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
+		e.a = a // 保留 credits/cooling/enabled 状态
 		return
 	}
-	p.byUID[a.UID] = &entry{a: a}
+	p.byUID[a.UID] = &entry{a: a, enabled: true}
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
@@ -140,7 +154,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 		if e, ok := p.byUID[a.UID]; ok {
 			e.a = a
 		} else {
-			p.byUID[a.UID] = &entry{a: a}
+			p.byUID[a.UID] = &entry{a: a, enabled: true}
 		}
 	}
 	for uid := range p.byUID {
@@ -148,6 +162,42 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 			delete(p.byUID, uid)
 		}
 	}
+}
+
+// Remove 删除账号（仅清内存索引与 state.json 条目；auths/trae-{uid}.json 由调用方删）。
+// 不存在返回 false，调用方据此决定 404。
+func (p *Pool) Remove(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.byUID[uid]; !ok {
+		return false
+	}
+	delete(p.byUID, uid)
+	p.saveLocked()
+	return true
+}
+
+// SetEnabled 切换账号软开关；不影响 disabled（session dead）状态。
+// reason 仅在关闭时记录。不存在返回 false。
+func (p *Pool) SetEnabled(uid string, enabled bool, reason string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.enabled = enabled
+	if !enabled && reason != "" {
+		e.reason = reason
+	}
+	if enabled {
+		// 重新启用时清掉软关闭的 reason；disabled/cooling 不动
+		if e.reason != "" && !e.disabled && e.until.IsZero() {
+			e.reason = ""
+		}
+	}
+	p.saveLocked()
+	return true
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
@@ -290,6 +340,100 @@ func (p *Pool) NoteSuccess(uid string) {
 	}
 }
 
+// CheckinGeneration 返回账号的签到设备轮换代数（未知账号或未轮换过为 0）。
+func (p *Pool) CheckinGeneration(uid string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok && e.checkinGen > 0 {
+		return e.checkinGen
+	}
+	return 0
+}
+
+// BumpCheckinGeneration 将签到设备代数 +1 并持久化（9074 限流后调用）；
+// 下次签到即换新设备 ID。不存在返回 0。
+func (p *Pool) BumpCheckinGeneration(uid string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return 0
+	}
+	e.checkinGen++
+	p.saveLocked()
+	return e.checkinGen
+}
+
+// 9074 退避参数：基线 60s，按次数指数增长并封顶。
+// Source: autumnsentiment/Trae2api-cn @ 2403954 + @ 165ac6e
+// （base 60s × 2^min(count,3)，上限 3600s；从不碰签到日期，只记退避）。
+const (
+	checkinRetryBase    = time.Minute
+	checkinRetryExpCap  = 3
+	checkinRetryMaxBack = time.Hour
+)
+
+// checkinBackoff 返回第 count 次 9074 后的等待时长（count 从 0 起）。
+func checkinBackoff(count int) time.Duration {
+	shift := count
+	if shift > checkinRetryExpCap {
+		shift = checkinRetryExpCap
+	}
+	d := checkinRetryBase << shift // 60→120→240→480s
+	if d > checkinRetryMaxBack {
+		d = checkinRetryMaxBack
+	}
+	return d
+}
+
+// NoteCheckinRateLimited 记录一次 9074，返回下次可重试时刻（wall-clock，持久化）。
+func (p *Pool) NoteCheckinRateLimited(uid string) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}
+	}
+	after := time.Now().Add(checkinBackoff(e.checkinRetryCount))
+	e.checkinRetryCount++
+	e.checkinRetryAfter = after
+	p.saveLocked()
+	return after
+}
+
+// CheckinRetryDue 报告账号是否有到期的签到重试（从未记录退避时为 false，
+// 首轮尝试归每日定时任务，避免后台循环与定时任务重复领取）。
+func (p *Pool) CheckinRetryDue(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok || e.checkinRetryCount == 0 {
+		return false
+	}
+	return !time.Now().Before(e.checkinRetryAfter)
+}
+
+// ClearCheckinRetry 清除 9074 退避（签到成功或已签到时调用；不碰代数）。
+func (p *Pool) ClearCheckinRetry(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && (e.checkinRetryCount != 0 || !e.checkinRetryAfter.IsZero()) {
+		e.checkinRetryCount = 0
+		e.checkinRetryAfter = time.Time{}
+		p.saveLocked()
+	}
+}
+
+// SetCheckinRetryAfterForTest 直接设置退避截止（仅供测试时间旅行；生产请用 NoteCheckinRateLimited）。
+func (p *Pool) SetCheckinRetryAfterForTest(uid string, t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.checkinRetryAfter = t
+		p.saveLocked()
+	}
+}
+
 // Status 查询单账号状态。
 func (p *Pool) Status(uid string) (Status, bool) {
 	p.mu.RLock()
@@ -337,6 +481,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Until:    e.until,
 		Reason:   e.reason,
 		Disabled: e.disabled,
+		Enabled:  e.enabled,
 		ErrCount: e.errCount,
 	}
 }
@@ -355,12 +500,24 @@ func (p *Pool) load() {
 		return
 	}
 	for uid, s := range sf.Accounts {
+		enabled := true // 旧文件无 enabled 字段 → 默认启用，向后兼容
+		if s.Enabled != nil {
+			enabled = *s.Enabled
+		}
+		gen := s.CheckinGen
+		if gen < 0 {
+			gen = 0
+		}
 		p.byUID[uid] = &entry{
-			a:        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:  s.Credits,
-			disabled: s.Disabled,
-			reason:   s.Reason,
-			until:    s.Until,
+			a:                 &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:           s.Credits,
+			disabled:          s.Disabled,
+			enabled:           enabled,
+			reason:            s.Reason,
+			until:             s.Until,
+			checkinGen:        gen,
+			checkinRetryAfter: s.CheckinRetryAfter,
+			checkinRetryCount: s.CheckinRetryCount,
 		}
 	}
 }
@@ -369,24 +526,23 @@ func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := stateFile{Accounts: map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	}{}}
+	sf := stateFile{Accounts: map[string]stateEntry{}}
 	for uid, e := range p.byUID {
-		sf.Accounts[uid] = struct {
-			Credits  int64     `json:"credits"`
-			Disabled bool      `json:"disabled"`
-			Reason   string    `json:"reason,omitempty"`
-			Until    time.Time `json:"until,omitempty"`
-		}{
-			Credits:  e.credits,
-			Disabled: e.disabled,
-			Reason:   e.reason,
-			Until:    e.until,
+		se := stateEntry{
+			Credits:           e.credits,
+			Disabled:          e.disabled,
+			Reason:            e.reason,
+			Until:             e.until,
+			CheckinGen:        e.checkinGen,
+			CheckinRetryAfter: e.checkinRetryAfter,
+			CheckinRetryCount: e.checkinRetryCount,
 		}
+		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
+		if !e.enabled {
+			f := false
+			se.Enabled = &f
+		}
+		sf.Accounts[uid] = se
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {

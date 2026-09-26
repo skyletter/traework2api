@@ -1,4 +1,4 @@
-// main.go traework2api 入口：加载配置 → 构建 pool → 起 HTTP 服务。
+// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
@@ -11,11 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/pool"
-	"traework2api/internal/scheduler"
-	"traework2api/internal/server"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/scheduler"
+	"trae2api-web/internal/server"
+	"trae2api-web/internal/upstream"
 )
 
 func main() {
@@ -55,6 +55,7 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		AuthDir:           cfg.AuthDir,
 		PlanCooldown:      cfg.PlanCreditDur,
 		ModelSoftCooldown: cfg.ModelSoftDur,
 		SoftCooldown:      cfg.SoftRateDur,
@@ -66,6 +67,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	go sch.RetryLoop(ctx, 15*time.Minute) // 9074 退避到期的 intraday 签到重试
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -79,7 +81,32 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("traework2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
+	// 第二个 http.Server：监听 CallbackPort（默认 18080），只处理 /authorize 回调。
+	// 复用同一 Handler（/authorize 已在主 mux 注册）。
+	// cfg.CallbackPort == "0" 时不启动（纯手动粘贴模式）。
+	var cbSrv *http.Server
+	if cfg.CallbackPort != "" && cfg.CallbackPort != "0" {
+		cbSrv = &http.Server{
+			Addr:              "127.0.0.1:" + cfg.CallbackPort,
+			Handler:           h,
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+		go func() {
+			<-ctx.Done()
+			sc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = cbSrv.Shutdown(sc)
+		}()
+		go func() {
+			log.Printf("trae2api-web callback server on 127.0.0.1:%s (TRAE login /authorize)", cfg.CallbackPort)
+			if err := cbSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				// 端口被占用（login.sh / 旧实例）不致命，降级为手动粘贴模式。
+				log.Printf("callback server (:%s) failed: %v — web 登录降级为手动粘贴回调链接", cfg.CallbackPort, err)
+			}
+		}()
+	}
+
+	log.Printf("trae2api-web listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

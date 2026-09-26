@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -214,6 +215,19 @@ func (a *Auth) saveAtomicLocked() error {
 		return err
 	}
 	return os.Rename(tmp, a.FilePath)
+}
+
+// FilePathFor 在已知 AuthDir 时构造 trae-{uid}.json 落盘路径。
+func FilePathFor(authDir, uid string) string {
+	return filepath.Join(authDir, "trae-"+uid+".json")
+}
+
+// MaskToken 保留前 n 字符 + 省略号；不足则全显示。用于面板 JSON 预览脱敏。
+func MaskToken(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…(" + strconv.Itoa(len(s)) + " chars)"
 }
 
 // LoadDir 扫描 dir 下 trae-*.json。解析失败的文件静默跳过（启动日志由调用方统计）。

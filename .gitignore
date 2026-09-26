@@ -6,22 +6,34 @@ config.json
 *.key
 *.pem
 
-# 二进制
-login
-signin
-credit
-signin_bin
-tw2api
-server
+# 二进制(锚定仓库根目录，避免屏蔽 cmd/ 下同名源码目录)
+/login
+/signin
+/credit
+/signin_bin
+/tw2api
+/server
+trae2api-web
+trae2api-web-*
 
 # 文档(doc 排除上传): 本地 md 不入库,README 除外
 *.md
 !README.md
-docs/
+docs/*
+!docs/RESEARCH.md
+!docs/PORTING.md
+!docs/VENDOR.md
+!docs/logo.svg
 
 # 构建产物
 *.tmp
 __pycache__/
+
+# 本地备份与编辑器残留(绝不 commit)
+*.bak
+*.bak-*
+*.orig
+*~
 
 # IDE
 .idea/

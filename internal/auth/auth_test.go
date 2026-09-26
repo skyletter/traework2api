@@ -3,6 +3,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -69,8 +70,10 @@ func TestSaveAtomicRoundtripPreservesSOLOFields(t *testing.T) {
 	if _, err := os.Stat(fp + ".tmp"); !os.IsNotExist(err) {
 		t.Error("tmp file should not remain")
 	}
-	if fi, err := os.Stat(fp); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("file mode=%v err=%v want 0600", fi.Mode().Perm(), err)
+	if fi, err := os.Stat(fp); err != nil {
+		t.Errorf("file stat err=%v", err)
+	} else if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Errorf("file mode=%v want 0600", fi.Mode().Perm())
 	}
 	raw, err := os.ReadFile(fp)
 	if err != nil {

@@ -13,11 +13,12 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen       string `json:"listen"`        // ":7864"
-	APIKey       string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
-	AuthDir      string `json:"auth_dir"`      // "./auths"
-	StateFile    string `json:"state_file"`    // "./data/state.json"
-	DefaultModel string `json:"default_model"` // "glm-5.2"
+	Listen        string `json:"listen"`         // ":7864"
+	CallbackPort  string `json:"callback_port"`  // "18080"（TRAE 登录回调监听端口，0 = 不起）
+	APIKey        string `json:"-"`              // 只读 env TW2A_API_KEY（不读 json）
+	AuthDir       string `json:"auth_dir"`       // "./auths"
+	StateFile     string `json:"state_file"`     // "./data/state.json"
+	DefaultModel  string `json:"default_model"`  // "glm-5.2"
 
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "30m"（1005 模型级冷却）
@@ -47,6 +48,7 @@ type Config struct {
 func Default() *Config {
 	c := &Config{
 		Listen:       ":7864",
+		CallbackPort: "18080",
 		APIKey:       "",
 		AuthDir:      "./auths",
 		StateFile:    "./data/state.json",
@@ -92,6 +94,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("TW2A_LISTEN"); v != "" {
 		c.Listen = v
+	}
+	if v := os.Getenv("TW2A_CALLBACK_PORT"); v != "" {
+		c.CallbackPort = v
 	}
 	if v := os.Getenv("TW2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v
@@ -159,6 +164,10 @@ func (c *Config) normalize() error {
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
+	}
+	// CallbackPort：空/未设 → 默认 18080；显式 "0" → 不起回调 server（纯手动粘贴模式）
+	if c.CallbackPort == "" {
+		c.CallbackPort = "18080"
 	}
 	return nil
 }

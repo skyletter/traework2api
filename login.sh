@@ -15,11 +15,16 @@
 #   ./login.sh
 set -euo pipefail
 
+# Windows 商店占位别名（AppInstallerPythonRedirector）非交互下 exit 49，回退到 python
+if ! python3 -c 'print(1)' >/dev/null 2>&1; then
+  python3() { python "$@"; }
+fi
+
 cd "$(dirname "$0")"
 AUTH_DIR="./auths"
-CONTAINER="traework2api"
+CONTAINER="trae2api-web"
 CLIENT_ID="en1oxy7wnw8j9n"          # SOLO stable
-APP_VERSION="0.1.43"
+APP_VERSION="0.1.52"
 API_HOST="https://api.trae.com.cn"  # ExchangeToken / GetUserInfo host（auth.apiHost）
 
 mkdir -p "$AUTH_DIR"
@@ -127,6 +132,23 @@ def parse_json_param(raw):
             continue
     return None
 
+def fix_mojibake(s, uid):
+    """修复回调 userInfo 中文被双重编码导致的昵称乱码（如 'Óû§8847309959'）。
+    尝试常见错误编码回转；无法修复时回退为 用户+uid末4位。"""
+    if not s:
+        return s
+    for enc in ("latin-1", "cp1252"):
+        try:
+            fixed = s.encode(enc).decode("utf-8")
+            if fixed and all(ch.isprintable() for ch in fixed):
+                return fixed
+        except Exception:
+            continue
+    # 无 CJK 字符 → 判定为乱码，回退
+    if not any('\u4e00' <= ch <= '\u9fff' for ch in s):
+        return "用户" + (uid[-4:] or "")
+    return s
+
 # ─── 解析回调链接（parse_qs + unquote 处理 URL 编码）───
 qs = urllib.parse.parse_qs(urllib.parse.urlparse(CALLBACK).query)
 refresh_token = (qs.get("refreshToken") or [""])[0]
@@ -134,7 +156,7 @@ user_info = parse_json_param((qs.get("userInfo") or [""])[0]) or {}
 user_jwt = parse_json_param((qs.get("userJwt") or [""])[0]) or {}
 
 uid = str(user_info.get("UserID") or "")
-nickname = str(user_info.get("ScreenName") or "")
+nickname = fix_mojibake(str(user_info.get("ScreenName") or ""), uid)
 ent_id = str(user_info.get("TenantID") or "")
 
 # 容错：回调缺 refreshToken 时，尝试 userJwt 里的 Token/RefreshToken
@@ -238,8 +260,12 @@ auth = {
         "deviceId": os.environ["DEVICE_ID"],
     },
 }
-with open(os.environ["AUTH_FILE"], "w") as f:
-    json.dump(auth, f, indent=1, ensure_ascii=False)
+# 原子写回：tmp + rename，避免写入中断损坏已有凭证（Windows GBK 编码/中断防御）
+import os as _os
+_tmp = _os.environ["AUTH_FILE"] + ".tmp"
+with open(_tmp, "w", encoding="utf-8") as _f:
+    json.dump(auth, _f, indent=1, ensure_ascii=False)
+_os.replace(_tmp, _os.environ["AUTH_FILE"])
 print(f"已保存（{os.environ['ACTION']}）: {os.environ['AUTH_FILE']}")
 PYEOF
 

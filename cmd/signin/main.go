@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"traework2api/internal/auth"
-	"traework2api/internal/upstream"
+	"trae2api-web/internal/auth"
+	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 type row struct {
@@ -24,10 +25,24 @@ type row struct {
 	hasRem bool
 }
 
+// generationFor 从调度器的 state.json 读取账号的签到设备代数，
+// 使 CLI 与调度器使用同一代设备 ID（缺文件/缺账号时回退 0，只读不写）。
+func generationFor(stateFp, uid string) int {
+	if stateFp == "" {
+		return 0
+	}
+	return pool.New(stateFp).CheckinGeneration(uid)
+}
+
 func main() {
 	dir := "auths"
-	if len(os.Args) > 1 {
-		dir = os.Args[1]
+	stateFp := ""
+	for _, arg := range os.Args[1:] {
+		if v, ok := strings.CutPrefix(arg, "--state="); ok {
+			stateFp = v
+		} else if dir == "auths" {
+			dir = arg
+		}
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "trae-*.json"))
 	if err != nil || len(files) == 0 {
@@ -74,8 +89,9 @@ func main() {
 			_ = a.SaveAtomic()
 		}
 
-		// 签到
-		checkedIn, _, enable, serr := up.CheckinStatus(a)
+		// 签到（代数来自调度器 state.json，与调度器同代；9074/业务码失败如实上报，不重试）
+		deviceID, _ := upstream.CheckinDevice(upstream.CheckinIdentity(a), generationFor(stateFp, a.UID))
+		checkedIn, _, enable, serr := up.CheckinStatus(a, deviceID)
 		switch {
 		case serr != nil:
 			if isAlready(serr.Error()) {
@@ -96,7 +112,7 @@ func main() {
 			r.detail = "checkin disabled"
 			failN++
 		default:
-			if err := up.CheckinClaim(a); err != nil {
+			if err := up.CheckinClaim(a, deviceID); err != nil {
 				r.status = "FAIL"
 				r.detail = short(err.Error())
 				failN++
@@ -128,8 +144,12 @@ func main() {
 
 // isAlready 已签判定：仅匹配明确表示"今日已签到"的业务错误。
 // 只用无歧义标记，避免 429/5xx body 含 "checkin" 字样被误判为已签。
+// 9095（设备已代签，多为别的账号）永远不算本账号已签。
 func isAlready(msg string) bool {
 	s := strings.ToLower(msg)
+	if strings.Contains(s, "9095") {
+		return false
+	}
 	return strings.Contains(s, "已签到") ||
 		strings.Contains(s, "already check") ||
 		strings.Contains(s, "already checked")
