@@ -1,15 +1,16 @@
 name: Check Upstream / Community Updates
 
-# 【重要变更 2026-09-23】
-# 原上游 Sliverkiss/traework2api 已删库（仓库 404），自动同步已停用。
-# 本仓库现为独立维护分支：traework2api 最终版代码 + 模型级冷却修复（1005 不再连坐账号池）。
+# 【重要变更 2026-09-26】
+# 原上游 Sliverkiss/traework2api 已删库（仓库 404）。
+# 本仓库现以 240xu/trae2api-more 为基线（已 merge，含 Web 管理面板、签到 self-healing），
+# 并保留模型级冷却修复（1005 不再连坐账号池、池级快速失败）。
+# 240xu 不提供 Docker 镜像，镜像由本仓库 Actions 构建（GHCR + Release）。
 #
-# 同源代码的社区延续分支（供参考/移植，未自动合并）：
-#   - 240xu/trae2api-more        checkin self-healing、一键 Web 登录（更新至 2026-09-12）
-#   - connectedGraph/trae2api-web Web 管理面板（更新至 2026-08-25）
-#   - JeffHu0912/trae2api        多账号管理面板，独立实现（更新至 2026-09-08）
+# 其他同源社区分支（供参考）：
+#   - connectedGraph/trae2api-web 240xu 的上游（Web 管理面板）
+#   - JeffHu0912/trae2api        独立实现（多账号面板）
 #
-# 手动运行本 workflow 可检查指定仓库与我们的提交差异（仅报告到 Summary，不自动合并）。
+# 手动运行本 workflow 可检查社区分支的新提交（仅报告到 Summary，不自动合并）。
 
 on:
   workflow_dispatch:
