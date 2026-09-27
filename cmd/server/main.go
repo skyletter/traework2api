@@ -19,6 +19,12 @@ import (
 )
 
 func main() {
+	// 子命令：add-account —— 容器内交互式添加账号（docker exec -it <容器> /app/add-account.sh）。
+	if len(os.Args) > 1 && os.Args[1] == "add-account" {
+		runAddAccount(os.Args[2:])
+		return
+	}
+
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	flag.Parse()
 
