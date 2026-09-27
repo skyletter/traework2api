@@ -39,6 +39,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ github.sha }}
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
@@ -47,8 +49,8 @@ jobs:
 
       - name: Export per-arch image tars
         run: |
-          docker buildx build --platform linux/amd64 -t tw2api:amd64 --load .
-          docker buildx build --platform linux/arm64 -t tw2api:arm64 --load .
+          docker buildx build --platform linux/amd64 -t tw2api:amd64 --build-arg VERSION=${{ github.sha }} --load .
+          docker buildx build --platform linux/arm64 -t tw2api:arm64 --build-arg VERSION=${{ github.sha }} --load .
           docker save tw2api:amd64 | gzip > traework2api-linux-amd64.tar.gz
           docker save tw2api:arm64 | gzip > traework2api-linux-arm64.tar.gz
           ls -lh *.tar.gz

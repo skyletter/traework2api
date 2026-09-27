@@ -18,6 +18,9 @@ import (
 	"trae2api-web/internal/upstream"
 )
 
+// version 构建版本（CI 注入 -X main.version=<commit>，未注入时为 dev）。
+var version = "dev"
+
 func main() {
 	// 子命令：add-account —— 容器内交互式添加账号（docker exec -it <容器> /app/add-account.sh）。
 	if len(os.Args) > 1 && os.Args[1] == "add-account" {
@@ -73,6 +76,14 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	go sch.RetryLoop(ctx, 15*time.Minute) // 9074 退避到期的 intraday 签到重试
+
+	// 启动补签到 + 运行报告（后台执行，完成后输出；不阻塞服务就绪）。
+	go func() {
+		time.Sleep(time.Second)
+		log.Printf("启动检查：刷新账号签到与积分 …")
+		outcomes := sch.RunStartupCheckin()
+		printStartupReport(cfg, p, outcomes)
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

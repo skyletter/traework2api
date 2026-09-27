@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"trae2api-web/internal/auth"
@@ -26,6 +27,8 @@ type Config struct {
 // Scheduler 调度器。
 type Scheduler struct {
 	cfg Config
+
+	checkinMu sync.Mutex // 串行化签到批次（每日/重试/启动补签），防同账号并发
 }
 
 // New 构建。
@@ -91,6 +94,8 @@ func contains(hours []int, h int) bool {
 // RunCheckinNow 立即对所有账号执行签到 + 积分刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 func (s *Scheduler) RunCheckinNow() {
+	s.checkinMu.Lock()
+	defer s.checkinMu.Unlock()
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -99,7 +104,7 @@ func (s *Scheduler) RunCheckinNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		s.checkinAccount(st, a)
+		_ = s.checkinAccount(st, a)
 		s.refreshCredits(st, a)
 	}
 }
@@ -108,6 +113,8 @@ func (s *Scheduler) RunCheckinNow() {
 // 退避公式与持久化见 pool.NoteCheckinRateLimited；成功/已签到清零。
 // Source: autumnsentiment/Trae2api-cn @ 2403954 + @ 165ac6e
 func (s *Scheduler) RunCheckinRetries() {
+	s.checkinMu.Lock()
+	defer s.checkinMu.Unlock()
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -119,9 +126,32 @@ func (s *Scheduler) RunCheckinRetries() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		s.checkinAccount(st, a)
+		_ = s.checkinAccount(st, a)
 		s.refreshCredits(st, a)
 	}
+}
+
+// RunStartupCheckin 启动补检查：对全部账号「查签到 → 未签则签」并刷新积分，
+// 返回每账号结果（供启动运行报告展示）。语义与每日定时任务一致：
+// 已签到的账号快速跳过；冷却账号也参与（签到可解冻）；硬禁用跳过。
+func (s *Scheduler) RunStartupCheckin() []CheckinOutcome {
+	s.checkinMu.Lock()
+	defer s.checkinMu.Unlock()
+	out := make([]CheckinOutcome, 0)
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			out = append(out, CheckinOutcome{UID: st.UID, Nickname: st.Nickname, Result: "skipped", Detail: "已禁用"})
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshTokenValue() == "" {
+			out = append(out, CheckinOutcome{UID: st.UID, Nickname: st.Nickname, Result: "skipped", Detail: "凭证缺失"})
+			continue
+		}
+		out = append(out, s.checkinAccount(st, a))
+		s.refreshCredits(st, a)
+	}
+	return out
 }
 
 // RetryLoop 每 interval 扫一次到期重试；ctx 取消时返回。
@@ -141,9 +171,27 @@ func (s *Scheduler) RetryLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// CheckinOutcome 单账号签到结果（供启动运行报告等消费）。
+type CheckinOutcome struct {
+	UID      string
+	Nickname string
+	Result   string // ok | already | not_enabled | rate_limited | error | skipped
+	Detail   string // 附注（退避时刻/错误摘要），可空
+}
+
+// who 返回账号展示名（昵称优先，附 uid 便于检索）。
+func who(st pool.Status) string {
+	if st.Nickname != "" {
+		return st.Nickname + " (" + st.UID + ")"
+	}
+	return st.UID
+}
+
 // checkinAccount 单账号一次 status→claim。9074 时轮换设备并记录退避
 // （status 限流换 ID 重查一次，claim 限流等退避到期）；成功/已签到清零退避。
-func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) {
+// 返回结果供启动运行报告汇总。
+func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) CheckinOutcome {
+	out := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 	identity := upstream.CheckinIdentity(a)
 	deviceID, pinned := upstream.CheckinDevice(identity, s.cfg.Pool.CheckinGeneration(st.UID))
 	checkedIn, _, enable, err := s.statusWithRefresh(a, deviceID)
@@ -154,16 +202,19 @@ func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) {
 		checkedIn, _, enable, err = s.statusWithRefresh(a, deviceID)
 	}
 	if err != nil {
-		log.Printf("checkin status %s: %v", st.UID, err)
-		return
+		log.Printf("checkin status %s: %v", who(st), err)
+		out.Result, out.Detail = "error", err.Error()
+		return out
 	}
 	if checkedIn {
 		s.cfg.Pool.ClearCheckinRetry(st.UID)
-		log.Printf("checkin %s: already checked in", st.UID)
-		return
+		log.Printf("checkin %s: already checked in", who(st))
+		out.Result = "already"
+		return out
 	}
 	if !enable {
-		return
+		out.Result = "not_enabled"
+		return out
 	}
 	if err := s.cfg.Upstream.CheckinClaim(a, deviceID); err != nil {
 		if errors.Is(err, upstream.ErrCheckinRateLimited) {
@@ -172,14 +223,19 @@ func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) {
 				log.Printf("checkin claim %s: rate limited (9074), rotated device to gen %d", st.UID, newGen)
 			}
 			after := s.cfg.Pool.NoteCheckinRateLimited(st.UID)
-			log.Printf("checkin claim %s: retry after %s", st.UID, after.Format("15:04:05"))
+			log.Printf("checkin claim %s: retry after %s", who(st), after.Format("15:04:05"))
+			out.Result = "rate_limited"
+			out.Detail = "重试 " + after.Format("15:04:05")
 		} else {
-			log.Printf("checkin claim %s: %v", st.UID, err)
+			log.Printf("checkin claim %s: %v", who(st), err)
+			out.Result, out.Detail = "error", err.Error()
 		}
-		return
+		return out
 	}
 	s.cfg.Pool.ClearCheckinRetry(st.UID)
-	log.Printf("checkin %s: ok", st.UID)
+	log.Printf("checkin %s: ok", who(st))
+	out.Result = "ok"
+	return out
 }
 
 // statusWithRefresh 查签到状态；401/1001 认证失败时刷新 token 落盘后只重试一次。
@@ -215,10 +271,11 @@ func isCheckinAuthFailure(err error) bool {
 func (s *Scheduler) refreshCredits(st pool.Status, a *auth.Auth) {
 	remain, err := s.cfg.Upstream.UserEntUsage(a)
 	if err != nil {
-		log.Printf("ent-usage %s: %v", st.UID, err)
+		log.Printf("ent-usage %s: %v", who(st), err)
 		return
 	}
 	s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+	log.Printf("credits %s: remain=%d", who(st), remain)
 }
 
 // RunRefreshNow 立即对所有账号刷新 token；session 失效的自动禁用。
