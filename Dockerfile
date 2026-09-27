@@ -15,8 +15,7 @@ RUN apk add --no-cache wget ca-certificates tzdata \
 USER app
 WORKDIR /app
 COPY --from=build /out/tw2api /app/tw2api
-COPY add-account.sh /app/add-account.sh
-RUN chmod +x /app/add-account.sh
+COPY --chown=app:app --chmod=755 add-account.sh /app/add-account.sh
 EXPOSE 7864
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7864/healthz || exit 1
