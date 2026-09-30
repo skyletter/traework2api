@@ -354,6 +354,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // 并延后到下次定时任务重试，不得立即重发。
 var ErrCheckinRateLimited = errors.New("checkin rate limited (9074)")
 
+// ErrCheckinSoftRate 上游签到接口服务器限流（HTTP 429 或业务码 3004）。
+// 与 9074 设备限流不同：轮换设备 ID 无效，调用方应按退避延后重试。
+var ErrCheckinSoftRate = errors.New("checkin soft rate limited (429)")
+
 // CheckinStatus 查询签到状态。deviceID 为签到专用设备 ID
 // （CheckinDevice 派生或操作员 pin）。
 // 上游同样用 HTTP 200 + 业务码：9074 返回 ErrCheckinRateLimited
@@ -383,6 +387,8 @@ func (c *Client) CheckinStatus(a *auth.Auth, deviceID string) (checkedIn bool, c
 		return resp.CheckedIn, resp.Credits, resp.Enable, nil
 	case 9074:
 		return false, 0, false, fmt.Errorf("checkin status %d: %s: %w", resp.Code, resp.Message, ErrCheckinRateLimited)
+	case 3004:
+		return false, 0, false, fmt.Errorf("checkin status %d: %s: %w", resp.Code, resp.Message, ErrCheckinSoftRate)
 	default:
 		return false, 0, false, fmt.Errorf("checkin status code %d: %s", resp.Code, resp.Message)
 	}
@@ -413,6 +419,8 @@ func (c *Client) CheckinClaim(a *auth.Auth, deviceID string) error {
 		return nil
 	case 9074:
 		return fmt.Errorf("checkin claim %d: %s: %w", resp.Code, resp.Message, ErrCheckinRateLimited)
+	case 3004:
+		return fmt.Errorf("checkin claim %d: %s: %w", resp.Code, resp.Message, ErrCheckinSoftRate)
 	default:
 		return fmt.Errorf("checkin claim code %d: %s", resp.Code, resp.Message)
 	}

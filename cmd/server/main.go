@@ -56,6 +56,7 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		CheckinHour:  cfg.Schedule.CheckinHour,
+		CheckinTimes: cfg.Schedule.CheckinTimes,
 		RefreshHours: cfg.Schedule.RefreshHours,
 		RefreshSkew:  24 * time.Hour,
 	})

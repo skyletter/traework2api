@@ -48,6 +48,7 @@ type fakeUpstream struct {
 	claimCalls     atomic.Int32
 	refreshCalls   atomic.Int32
 	resourceRemain int64
+	softRateClaim  atomic.Bool
 }
 
 func (f *fakeUpstream) server() *httptest.Server {
@@ -58,6 +59,11 @@ func (f *fakeUpstream) server() *httptest.Server {
 			w.Write([]byte(`{"checked_in":false,"credits":200,"enable":true}`))
 		case strings.HasSuffix(r.URL.Path, "/checkin_credits/claim"):
 			f.claimCalls.Add(1)
+			if f.softRateClaim.Load() {
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte(`{"code":3004,"message":"Too Many Requests"}`))
+				return
+			}
 			w.Write([]byte(`{"code":0,"message":"success"}`))
 		case strings.HasSuffix(r.URL.Path, "/ide_user_ent_usage"):
 			w.Write([]byte(`{"is_credits_billing":true,"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":` +
@@ -390,5 +396,91 @@ func TestRunCheckinPinnedDeviceNeverRotates(t *testing.T) {
 	s.RunCheckinNow()
 	if g := p.CheckinGeneration("u1"); g != 0 {
 		t.Errorf("generation=%d want 0 (pinned device must not rotate)", g)
+	}
+}
+
+func TestParseCheckinTimes(t *testing.T) {
+	slots := parseCheckinTimes([]string{"07:45", " 17:15 ", "bad", "25:00"}, 9)
+	if len(slots) != 2 {
+		t.Fatalf("slots=%v want 2 (invalid entries skipped)", slots)
+	}
+	if slots[0].h != 7 || slots[0].m != 45 || slots[1].h != 17 || slots[1].m != 15 {
+		t.Errorf("slots=%v want sorted 07:45,17:15", slots)
+	}
+	slots = parseCheckinTimes(nil, 9)
+	if len(slots) != 1 || slots[0].h != 9 || slots[0].m != 0 {
+		t.Errorf("fallback slots=%v want 09:00", slots)
+	}
+}
+
+func TestNextCheckinFire(t *testing.T) {
+	s := New(Config{CheckinTimes: []string{"07:45", "17:15"}, CheckinHour: 9, RefreshHours: []int{3}, RefreshSkew: time.Hour})
+
+	// 清晨 → 今天的 07:45±10min
+	now := time.Date(2026, 9, 30, 6, 0, 0, 0, time.Local)
+	next := s.nextCheckinFire(now)
+	if next.Day() != 30 || next.Hour() != 7 {
+		t.Fatalf("next=%v want today 07:xx", next)
+	}
+	nominal := time.Date(2026, 9, 30, 7, 45, 0, 0, time.Local)
+	if d := next.Sub(nominal); d < -checkinJitterMax || d > checkinJitterMax {
+		t.Errorf("next=%v off nominal by %v, want within ±%v", next, d, checkinJitterMax)
+	}
+	if again := s.nextCheckinFire(now); !again.Equal(next) {
+		t.Errorf("jitter not deterministic: %v vs %v", again, next)
+	}
+
+	// 上午 8 点（07:45 窗口已过）→ 今天 17:15±10min
+	now = time.Date(2026, 9, 30, 8, 0, 0, 0, time.Local)
+	next = s.nextCheckinFire(now)
+	nominal = time.Date(2026, 9, 30, 17, 15, 0, 0, time.Local)
+	if next.Day() != 30 || next.Hour() != 17 {
+		t.Fatalf("next=%v want today 17:xx", next)
+	}
+	if d := next.Sub(nominal); d < -checkinJitterMax || d > checkinJitterMax {
+		t.Errorf("next=%v off nominal by %v", next, d)
+	}
+
+	// 深夜 → 明天第一个时刻
+	now = time.Date(2026, 9, 30, 23, 0, 0, 0, time.Local)
+	next = s.nextCheckinFire(now)
+	if next.Month() != time.October || next.Day() != 1 || next.Hour() != 7 {
+		t.Fatalf("next=%v want Oct 1 07:xx", next)
+	}
+}
+
+func TestRunCheckinSoftRateSchedulesRetry(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 500}
+	f.softRateClaim.Store(true)
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	s := newTestScheduler(f, p, srv)
+
+	s.RunCheckinNow()
+	if f.claimCalls.Load() != 1 {
+		t.Fatalf("claim calls=%d want 1 (no immediate retry on 429)", f.claimCalls.Load())
+	}
+	if p.CheckinRetryDue("u1") {
+		t.Errorf("retry must not be due inside backoff window")
+	}
+	if p.CheckinGeneration("u1") != 0 {
+		t.Errorf("generation=%d want 0 (429 must not rotate device)", p.CheckinGeneration("u1"))
+	}
+
+	// 退避到期（时间旅行）后重试成功
+	f.softRateClaim.Store(false)
+	p.SetCheckinRetryAfterForTest("u1", time.Now().Add(-time.Second))
+	s.RunCheckinRetries()
+	if f.claimCalls.Load() != 2 {
+		t.Fatalf("claim calls=%d want 2 after backoff retry", f.claimCalls.Load())
+	}
+	if p.CheckinRetryDue("u1") {
+		t.Errorf("retry state should be cleared after success")
+	}
+	if st, _ := p.Status("u1"); st.Credits != 500 {
+		t.Errorf("credits=%d want 500 after successful retry", st.Credits)
 	}
 }

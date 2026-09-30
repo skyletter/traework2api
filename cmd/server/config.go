@@ -13,12 +13,12 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen        string `json:"listen"`         // ":7864"
-	CallbackPort  string `json:"callback_port"`  // "18080"（TRAE 登录回调监听端口，0 = 不起）
-	APIKey        string `json:"-"`              // 只读 env TW2A_API_KEY（不读 json）
-	AuthDir       string `json:"auth_dir"`       // "./auths"
-	StateFile     string `json:"state_file"`     // "./data/state.json"
-	DefaultModel  string `json:"default_model"`  // "glm-5.2"
+	Listen       string `json:"listen"`        // ":7864"
+	CallbackPort string `json:"callback_port"` // "18080"（TRAE 登录回调监听端口，0 = 不起）
+	APIKey       string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
+	AuthDir      string `json:"auth_dir"`      // "./auths"
+	StateFile    string `json:"state_file"`    // "./data/state.json"
+	DefaultModel string `json:"default_model"` // "glm-5.2"
 
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "12h"
@@ -28,8 +28,9 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHour  int   `json:"checkin_hour"`  // 9
-		RefreshHours []int `json:"refresh_hours"` // [3]
+		CheckinHour  int      `json:"checkin_hour"`  // 兼容：checkin_times 为空时按 "HH:00" 生效
+		CheckinTimes []string `json:"checkin_times"` // 每日签到时刻，默认 ["07:45","17:15"]
+		RefreshHours []int    `json:"refresh_hours"` // [3]
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -57,6 +58,7 @@ func Default() *Config {
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
 	c.Schedule.CheckinHour = 9
+	c.Schedule.CheckinTimes = []string{"07:45", "17:15"}
 	c.Schedule.RefreshHours = []int{3}
 	c.Upstream.TimeoutSeconds = 120
 	return c
@@ -118,9 +120,20 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("TW2A_ERR_COOLDOWN"); v != "" {
 		c.Cooldown.ErrCooldown = v
 	}
-	if v := os.Getenv("TW2A_CHECKIN_HOUR"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
+	if v := os.Getenv("TW2A_CHECKIN_TIMES"); v != "" {
+		var ts []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				ts = append(ts, p)
+			}
+		}
+		if len(ts) > 0 {
+			c.Schedule.CheckinTimes = ts
+		}
+	} else if v := os.Getenv("TW2A_CHECKIN_HOUR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 23 {
 			c.Schedule.CheckinHour = n
+			c.Schedule.CheckinTimes = []string{fmt.Sprintf("%02d:00", n)} // 旧变量语义：显式指定小时即整体覆盖
 		}
 	}
 	if v := os.Getenv("TW2A_TIMEOUT_SECONDS"); v != "" {

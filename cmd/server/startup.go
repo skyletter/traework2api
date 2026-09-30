@@ -33,7 +33,7 @@ func printStartupReport(cfg *Config, p *pool.Pool, outcomes []scheduler.CheckinO
 	fmt.Fprintf(&b, "监听     : %s    %s\n", cfg.Listen, cb)
 	fmt.Fprintf(&b, "凭证目录 : %s\n", cfg.AuthDir)
 	fmt.Fprintf(&b, "状态文件 : %s\n", cfg.StateFile)
-	fmt.Fprintf(&b, "定时任务 : 签到每日 %02d:00 | token 刷新 %s\n", cfg.Schedule.CheckinHour, fmtHours(cfg.Schedule.RefreshHours))
+	fmt.Fprintf(&b, "定时任务 : 签到 %s（±10分钟随机） | token 刷新 %s\n", checkinTimesText(cfg), fmtHours(cfg.Schedule.RefreshHours))
 	fmt.Fprintf(&b, "账号池   : %d 个账号 | 合计积分 %d\n", len(sts), total)
 	if len(sts) == 0 {
 		b.WriteString("  （空）在 NAS 终端执行：docker exec -it <容器名> /app/add-account.sh\n")
@@ -71,6 +71,14 @@ func fmtHours(hs []int) string {
 		return "-"
 	}
 	return strings.Join(parts, ",")
+}
+
+// checkinTimesText 展示每日签到时刻；配置为空时回退显示 CheckinHour 整点。
+func checkinTimesText(cfg *Config) string {
+	if len(cfg.Schedule.CheckinTimes) > 0 {
+		return strings.Join(cfg.Schedule.CheckinTimes, "/")
+	}
+	return fmt.Sprintf("%02d:00", cfg.Schedule.CheckinHour)
 }
 
 // clip 单行化并按字符数截断（超长以 … 结尾），用于报告展示。

@@ -5,7 +5,11 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +23,8 @@ import (
 type Config struct {
 	Pool         *pool.Pool
 	Upstream     *upstream.Client
-	CheckinHour  int           // 每日签到小时，默认 9
+	CheckinHour  int           // 兼容字段：checkin_times 为空时按 "HH:00" 生效，默认 9
+	CheckinTimes []string      // 每日签到时刻 "HH:MM" 列表；为空时回退 CheckinHour
 	RefreshHours []int         // token 预刷新小时，默认 [3]
 	RefreshSkew  time.Duration // 预刷新窗口，默认 24h
 }
@@ -29,6 +34,8 @@ type Scheduler struct {
 	cfg Config
 
 	checkinMu sync.Mutex // 串行化签到批次（每日/重试/启动补签），防同账号并发
+
+	slots []checkinSlot // 解析后的每日签到时刻
 }
 
 // New 构建。
@@ -42,7 +49,85 @@ func New(cfg Config) *Scheduler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 24 * time.Hour
 	}
-	return &Scheduler{cfg: cfg}
+	return &Scheduler{cfg: cfg, slots: parseCheckinTimes(cfg.CheckinTimes, cfg.CheckinHour)}
+}
+
+// checkinSlot 一天内的一个签到触发时刻。
+type checkinSlot struct {
+	h, m int
+}
+
+// parseCheckinTimes 解析 "HH:MM" 列表；全部非法/为空时回退 fallbackHour 整点。
+func parseCheckinTimes(times []string, fallbackHour int) []checkinSlot {
+	out := make([]checkinSlot, 0, len(times))
+	for _, ts := range times {
+		h, m, ok := parseHHMM(ts)
+		if !ok {
+			log.Printf("checkin time %q invalid (want HH:MM), skipped", ts)
+			continue
+		}
+		out = append(out, checkinSlot{h: h, m: m})
+	}
+	if len(out) == 0 {
+		if fallbackHour < 0 || fallbackHour > 23 {
+			fallbackHour = 9
+		}
+		out = []checkinSlot{{h: fallbackHour, m: 0}}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].h != out[j].h {
+			return out[i].h < out[j].h
+		}
+		return out[i].m < out[j].m
+	})
+	return out
+}
+
+// parseHHMM 解析 "HH:MM"。
+func parseHHMM(ts string) (int, int, bool) {
+	parts := strings.SplitN(strings.TrimSpace(ts), ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
+// checkinJitterMax 每日签到的随机偏移上限（±10 分钟），错开整点拥堵。
+const checkinJitterMax = 10 * time.Minute
+
+// checkinJitter 以「日期+时刻」为种子的确定性伪随机偏移，范围 [-max, +max]。
+// 确定性保证同一天同一时刻的触发点稳定：调度重算、容器重启都不会二次触发。
+func checkinJitter(day time.Time, h, m int) time.Duration {
+	key := fmt.Sprintf("%04d-%02d-%02d|%02d:%02d", day.Year(), int(day.Month()), day.Day(), h, m)
+	sum := fnv.New32a()
+	_, _ = sum.Write([]byte(key))
+	span := int64(checkinJitterMax / time.Minute)
+	off := int64(sum.Sum32()) % (2*span + 1)
+	return time.Duration(off-span) * time.Minute
+}
+
+// nextCheckinFire 返回下一个签到触发点：多个每日时刻，各自叠加确定性抖动。
+func (s *Scheduler) nextCheckinFire(now time.Time) time.Time {
+	var best time.Time
+	for _, slot := range s.slots {
+		for d := 0; d < 2; d++ {
+			day := now.AddDate(0, 0, d)
+			t := time.Date(day.Year(), day.Month(), day.Day(), slot.h, slot.m, 0, 0, now.Location()).
+				Add(checkinJitter(day, slot.h, slot.m))
+			if t.After(now) && (best.IsZero() || t.Before(best)) {
+				best = t
+			}
+		}
+	}
+	if best.IsZero() { // 理论不可达（明天必有候选）；兜底
+		return now.Add(time.Hour)
+	}
+	return best
 }
 
 // nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
@@ -60,35 +145,30 @@ func nextFire(now time.Time, hours []int) time.Time {
 	return earliest
 }
 
-// Run 主循环，阻塞直到 ctx 取消。
+// Run 主循环，阻塞直到 ctx 取消。签到与 token 预刷新各自维护触发点，
+// 每轮取较早者触发（签到时刻带 ±10 分钟确定性抖动，见 checkinJitter）。
 func (s *Scheduler) Run(ctx context.Context) {
-	all := append(append([]int{}, s.cfg.RefreshHours...), s.cfg.CheckinHour)
 	for {
-		next := nextFire(time.Now(), all)
+		now := time.Now()
+		checkinAt := s.nextCheckinFire(now)
+		refreshAt := nextFire(now, s.cfg.RefreshHours)
+		next, doCheckin := checkinAt, true
+		if refreshAt.Before(checkinAt) {
+			next, doCheckin = refreshAt, false
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
-			h := time.Now().Hour()
-			if contains(s.cfg.RefreshHours, h) {
+			if doCheckin {
+				s.RunCheckinNow()
+			} else {
 				s.RunRefreshNow()
 			}
-			if s.cfg.CheckinHour == h {
-				s.RunCheckinNow()
-			}
 		}
 	}
-}
-
-func contains(hours []int, h int) bool {
-	for _, v := range hours {
-		if v == h {
-			return true
-		}
-	}
-	return false
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 积分刷新 + 解冻。
@@ -187,6 +267,15 @@ func who(st pool.Status) string {
 	return st.UID
 }
 
+// isSoftRate 判断是否上游服务器限流（HTTP 429 或业务码 3004）——可退避重试。
+func isSoftRate(err error) bool {
+	if errors.Is(err, upstream.ErrCheckinSoftRate) {
+		return true
+	}
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Kind == upstream.ErrSoftRate
+}
+
 // checkinAccount 单账号一次 status→claim。9074 时轮换设备并记录退避
 // （status 限流换 ID 重查一次，claim 限流等退避到期）；成功/已签到清零退避。
 // 返回结果供启动运行报告汇总。
@@ -202,6 +291,12 @@ func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) CheckinOutcome 
 		checkedIn, _, enable, err = s.statusWithRefresh(a, deviceID)
 	}
 	if err != nil {
+		if isSoftRate(err) {
+			after := s.cfg.Pool.NoteCheckinRateLimited(st.UID)
+			log.Printf("checkin status %s: soft rate limited (429), retry after %s", who(st), after.Format("15:04:05"))
+			out.Result, out.Detail = "rate_limited", "重试 "+after.Format("15:04:05")
+			return out
+		}
 		log.Printf("checkin status %s: %v", who(st), err)
 		out.Result, out.Detail = "error", err.Error()
 		return out
@@ -224,6 +319,12 @@ func (s *Scheduler) checkinAccount(st pool.Status, a *auth.Auth) CheckinOutcome 
 			}
 			after := s.cfg.Pool.NoteCheckinRateLimited(st.UID)
 			log.Printf("checkin claim %s: retry after %s", who(st), after.Format("15:04:05"))
+			out.Result = "rate_limited"
+			out.Detail = "重试 " + after.Format("15:04:05")
+		} else if isSoftRate(err) {
+			// 429 服务器限流：轮换设备无效，按同一退避机制延后重试。
+			after := s.cfg.Pool.NoteCheckinRateLimited(st.UID)
+			log.Printf("checkin claim %s: soft rate limited (429), retry after %s", who(st), after.Format("15:04:05"))
 			out.Result = "rate_limited"
 			out.Detail = "重试 " + after.Format("15:04:05")
 		} else {
